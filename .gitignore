@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Environment — the example is committed, real values never are.
+# NMI security keys, the Mongo URI, the session HMAC key and mail credentials live in the host
+# secret store. Nothing secret has ever belonged in this repository (§9.6).
+.env
+.env.*
+!.env.example
+
+# Build output of the manuscript ingestion. Regenerate with `npm run ingest:manuscript`.
+# The certified release is reproducible from the source DOCX; committing it would create a
+# second copy of canonical text that could drift from the one the founder certified.
+content/generated/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Ledger and cohort exports contain PII and financial records.
+exports/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.sw?

@@ -1,0 +1,38 @@
+{
+  "prohibited_terms": [
+    "join",
+    "join now",
+    "join us",
+    "sign up",
+    "become a member",
+    "membership",
+    "recruit",
+    "convert",
+    "enlist",
+    "invite people",
+    "spread the movement",
+    "go viral",
+    "share if you care",
+    "humanity depends on you",
+    "act now",
+    "limited time",
+    "be part of history"
+  ],
+  "prohibited_mechanics": [
+    "popups",
+    "forced overlays",
+    "share counters",
+    "likes",
+    "leaderboards",
+    "badges",
+    "streaks",
+    "urgency timers",
+    "social proof indicators",
+    "viral loops",
+    "referral rewards",
+    "algorithmic emotional targeting",
+    "auto-share prompts"
+  ],
+  "threshold_phrase": "Become Family.",
+  "sharing_rule": "Sharing is human continuity transfer only after recognition, reflection, decompression, and regulation."
+}
