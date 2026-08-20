@@ -1,37 +1,3 @@
-/**
- * The contribution workflow — workflow A (pathways 2 and 5).
- *
- * > "Digital transcript access uses a donation workflow. Hardcover editions use a product
- * > purchase workflow. These remain separate throughout the platform."
- *
- * Nothing in this file touches `orders`, `products`, shipping, or the sales receipt series.
- * There is no cart, no cross-sell, and no "add a donation to your order" — merging the two
- * would also commingle MCC 8398 charitable revenue with product revenue (§6.4, §6.13).
- *
- * ## What the reader experiences
- *
- * Pay-what-you-can, donor-chosen, one time only. No preset is highlighted, no goal meter,
- * no supporter count, no monthly toggle, no "give again". The acknowledgment is a receipt
- * and a thank-you; §6.6 forbids every form of gamification on this path, and a one-dollar
- * contribution is acknowledged exactly as a thousand-dollar one is.
- *
- * ## Double charging is structurally impossible from the UI
- *
- * Every attempt carries an application-level `idempotencyKey`, unique-indexed on
- * `donations`. A repeated key is treated as a *status query*, never as a second attempt
- * (§6.14). The key is additionally handed to NMI as a merchant-defined field so the
- * gateway's own duplicate detection sees it too. When a record is stuck at `initiated` —
- * the response was lost in flight — the gateway is queried by order id before any retry is
- * accepted, so an ambiguous outcome is resolved by asking the gateway rather than by
- * charging again.
- *
- * ## Card data
- *
- * Never reaches this process. The browser tokenises with Collect.js; this service forwards
- * a single-use token and stores only brand and last four digits (§6.13.1). The security key
- * lives in configuration, is read only by `lib/nmiClient.js`, and appears in no log line.
- */
-
 import { SCHEMA_VERSION } from '../../config/constants.js';
 import { COLLECTIONS, creationStamps, updateStamps } from '../../db/collections.js';
 import { AUDIT_ACTIONS, writeAuditSafe } from '../../lib/audit.js';
@@ -43,37 +9,19 @@ import { ApiError } from '../../plugins/errors.js';
 import { RECEIPT_SERIES, assignReceiptNumber, createGrantsService } from './grants.js';
 import { MINIMUM_DONATION_CENTS } from './schemas.js';
 
-/** The contribution kind that carries a transcript grant. */
 const TRANSCRIPT_KIND = 'digital_transcript_access';
 
-/** What the gateway is told this charge is for. Linted copy, no solicitation language. */
 const ORDER_DESCRIPTION = 'One Global People contribution';
 
-/** Calm, honest, non-coercive — §6.14, verbatim in intent. */
 const GATEWAY_UNAVAILABLE_MESSAGE =
   'Something interrupted the connection. Nothing was charged. Please try again in a moment.';
 
-/**
- * Extract the last four digits of a masked card number. The gateway returns a masked value;
- * this reads only the trailing four characters when they are digits, so no PAN can ever
- * enter the database even if the gateway's masking changes.
- *
- * @param {Record<string, string>|undefined} raw The raw gateway fields.
- * @returns {string|null} Four digits, or null.
- */
 function last4From(raw) {
   const candidate = String(raw?.cc_number ?? '');
   const match = /([0-9]{4})\s*$/.exec(candidate);
   return match ? match[1] : null;
 }
 
-/**
- * The stored gateway result. Brand and last four digits only — never a PAN, an expiry or a
- * CVV, in the database, in a log, or in an error report.
- *
- * @param {object} result A normalised NMI response.
- * @returns {object} The `nmi` sub-document.
- */
 export function toNmiResult(result) {
   return {
     transactionId: result.transactionId ?? null,
@@ -88,14 +36,6 @@ export function toNmiResult(result) {
   };
 }
 
-/**
- * Write one row of the gateway audit trail. Both workflows write here; the `workflow` and
- * `refCollection` fields are what keep the two ledgers separable at export time (§6.12).
- *
- * @param {import('mongodb').Db} db An open database handle.
- * @param {object} input Transaction facts.
- * @returns {Promise<void>} Resolves when written, or when the row already existed.
- */
 export async function recordPaymentTransaction(db, input) {
   const {
     result,
@@ -132,17 +72,10 @@ export async function recordPaymentTransaction(db, input) {
       ...creationStamps(SCHEMA_VERSION, now),
     });
   } catch (error) {
-    // The trail is append-only and unique per (transaction, kind). A duplicate means the
-    // row is already there — which is the desired end state, not a failure.
     if (error?.code !== 11000 && error?.code !== 11001) throw error;
   }
 }
 
-/**
- * @param {{ db: import('mongodb').Db, config: object, logger?: object, mailer?: object,
- *           nmi?: object, grants?: object }} deps Dependencies.
- * @returns {object} The donations service.
- */
 export function createDonationsService({
   db,
   config,
@@ -156,7 +89,6 @@ export function createDonationsService({
   const mail = mailer ?? createMailer({ logger });
   const grantsService = grants ?? createGrantsService({ db, config, logger });
 
-  /** The configured floor, never below the §6.6 minimum. */
   function minimumCents() {
     const configured = config.commerce?.minimumDonationCents;
     return Number.isInteger(configured) && configured > MINIMUM_DONATION_CENTS
@@ -164,15 +96,6 @@ export function createDonationsService({
       : MINIMUM_DONATION_CENTS;
   }
 
-  /**
-   * Send one message without letting a mail failure undo a completed contribution. The
-   * money moved; a transport problem is ours to fix, not the reader's to absorb.
-   *
-   * @param {string} template Template name.
-   * @param {string} to Recipient address.
-   * @param {object} input Template input.
-   * @returns {Promise<void>} Always resolves.
-   */
   async function sendQuietly(template, to, input) {
     try {
       await mail.sendTemplate(template, to, input);
@@ -181,14 +104,6 @@ export function createDonationsService({
     }
   }
 
-  /**
-   * The success payload, assembled once so a fresh capture and a replayed idempotency key
-   * cannot drift apart.
-   *
-   * @param {object} donation The stored contribution.
-   * @param {{ granted: boolean, url: string }|null} digitalAccess The grant, if any.
-   * @returns {object} The route response.
-   */
   function toCreatedResponse(donation, digitalAccess) {
     return {
       donationId: donation._id,
@@ -198,15 +113,6 @@ export function createDonationsService({
     };
   }
 
-  /**
-   * Everything that happens once the gateway approves: the receipt number, the ledger row,
-   * the grant, the two emails and the audit entry.
-   *
-   * @param {object} donation The `initiated` contribution.
-   * @param {object} result The approved gateway response.
-   * @param {{ correlationId?: string|null }} options Audit context.
-   * @returns {Promise<object>} The route response.
-   */
   async function capture(donation, result, options = {}) {
     const now = new Date();
     const nmiResult = toNmiResult(result);
@@ -239,7 +145,6 @@ export function createDonationsService({
 
     let digitalAccess = null;
     if (donation.kind === TRANSCRIPT_KIND) {
-      // Digital delivery is automated. There is no manual fulfilment step on this path.
       const grant = await grantsService.mint({
         donationId: donation._id,
         email: donation.email ?? null,
@@ -306,16 +211,6 @@ export function createDonationsService({
     return toCreatedResponse(captured, digitalAccess);
   }
 
-  /**
-   * Record a refusal. No payment_transactions row is written: a decline has no gateway
-   * transaction id, and the ledger holds movements of money, not attempts.
-   *
-   * @param {object} donation The `initiated` contribution.
-   * @param {object} result The gateway response.
-   * @param {'declined'|'failed'} status The terminal status.
-   * @param {string} reason A coarse machine reason.
-   * @returns {Promise<void>} Resolves when recorded.
-   */
   async function recordRefusal(donation, result, status, reason) {
     const now = new Date();
     await donations.updateOne(
@@ -331,15 +226,6 @@ export function createDonationsService({
     );
   }
 
-  /**
-   * Re-present the outcome of a contribution that already exists under this idempotency
-   * key. §6.14: "the server treats a repeated key as a status query — double-charging is
-   * structurally impossible from the UI."
-   *
-   * @param {object} existing The stored contribution.
-   * @param {{ correlationId?: string|null }} options Audit context.
-   * @returns {Promise<object>} A created response, or a decline.
-   */
   async function resume(existing, options) {
     if (existing.status === 'captured') {
       const digitalAccess = await grantsService.describe(existing.digitalAccessGrantId ?? null);
@@ -349,8 +235,6 @@ export function createDonationsService({
       return { declined: true, reason: existing.failureReason ?? 'card_declined' };
     }
 
-    // Ambiguous: we hold an `initiated` record with no gateway answer. Ask the gateway what
-    // happened before letting anything else touch this key (§6.14).
     let queried = null;
     try {
       queried = await gateway.request({ type: 'query', order_id: existing._id });
@@ -377,14 +261,6 @@ export function createDonationsService({
   return {
     grants: grantsService,
 
-    /**
-     * `POST /commerce/donations`.
-     *
-     * @param {object|null} session The authenticated session, or null.
-     * @param {object} input The validated request body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<object|{ declined: true, reason: string }>} The outcome.
-     */
     async create(session, input, options = {}) {
       const floor = minimumCents();
       if (input.amountCents < floor) {
@@ -406,9 +282,6 @@ export function createDonationsService({
         anonymous,
         email: typeof input.email === 'string' ? input.email.trim().toLowerCase() : null,
         displayName: null,
-        // An anonymous contribution keeps no link to the reading session at all. The
-        // linkage is optional funnel data (§9.2.9); anonymity is the reader's request, and
-        // the protective reading of it is to store less, not to store it and hide it.
         sessionId: anonymous ? null : (session?._id ?? null),
         nmi: null,
         receiptNumber: null,
@@ -467,19 +340,6 @@ export function createDonationsService({
       throw new ApiError(503, 'PAYMENT_UNAVAILABLE', GATEWAY_UNAVAILABLE_MESSAGE);
     },
 
-    /**
-     * `POST /commerce/donations/free-access`.
-     *
-     * The corpus requires the capability; whether it is on at launch is a founder switch
-     * (§6.6). The path has no gateway dependency at all, which is deliberate: a payments
-     * outage must never lock a reader out of the transcript.
-     *
-     * No shame framing exists here — no "are you sure", no comparison to contributors, no
-     * second ask. One address, one grant, one delivery.
-     *
-     * @param {object} input The validated request body.
-     * @returns {Promise<{ digitalAccess: { granted: true, url: string } }>} The grant.
-     */
     async freeAccess(input) {
       if (config.flags.freeAccessEnabled !== true) {
         throw new ApiError(

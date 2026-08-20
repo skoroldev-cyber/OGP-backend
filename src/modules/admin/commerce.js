@@ -1,56 +1,23 @@
-/**
- * Commerce administration — two ledgers that never merge.
- *
- * Contributions and printed-edition sales are listed by two routes, over two collections,
- * with two receipt series and two refund policies. There is no combined revenue view and no
- * route in this module returns both: the merchant account is MCC 8398 (charity) while sales
- * are product revenue, and a single "total" tile would be the first step toward
- * misclassifying one as the other (§6.4, §10.4.5).
- *
- * ## Refunds
- *
- * Refunds are an administrator action, never automatic, and above a configured threshold
- * they require **two distinct people**. The second authorisation is not a field on the
- * record — it is read from the append-only audit trail, which is where "who agreed to this"
- * already lives and which nobody can edit to make one person look like two. An
- * authorisation is valid for twenty-four hours and for one exact amount.
- *
- * Access is not punishment. A refunded contribution revokes the transcript grant only when
- * the request explicitly says so — §6.8's "made in error" case. The default for a goodwill
- * reversal is to leave the reader's access exactly where it is.
- */
-
 import { COLLECTIONS, updateStamps } from '../../db/collections.js';
 import { AUDIT_ACTIONS, writeAudit } from '../../lib/audit.js';
 import { nmiClient } from '../../lib/nmiClient.js';
+import { toPaging } from '../../lib/schemas.js';
 import { ApiError } from '../../plugins/errors.js';
 import { recordPaymentTransaction } from '../commerce/donations.js';
 import { createGrantsService } from '../commerce/grants.js';
 import { toInteger, toIso } from './schemas.js';
 
-/**
- * Refund value above which a second administrator must agree, in cents. The corpus fixes no
- * figure (§6.10 leaves every amount to the founder), so this is the default until
- * `config.commerce.refundDualAuthorizationCents` is set — changeable without a deployment.
- */
 export const DEFAULT_DUAL_AUTHORIZATION_CENTS = 25_000;
 
-/** How long a recorded authorisation stays valid. */
 const AUTHORIZATION_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-/** Audit actions this module writes that `lib/audit.js` does not already name. */
 export const COMMERCE_AUDIT_ACTIONS = Object.freeze({
   DONATION_REFUND_AUTHORIZED: 'donation.refund_authorized',
   ORDER_REFUND_AUTHORIZED: 'order.refund_authorized',
 });
 
-/** Gateway text that means "this has not settled yet; void it instead of refunding". */
 const UNSETTLED_PATTERN = /not settled|unsettled|only.*void|cannot be refunded/i;
 
-/**
- * @param {Array<object>|undefined} refunds Stored refund entries.
- * @returns {number} Total already returned, in cents.
- */
 function refundedTotal(refunds) {
   if (!Array.isArray(refunds)) return 0;
   return refunds.reduce(
@@ -59,10 +26,6 @@ function refundedTotal(refunds) {
   );
 }
 
-/**
- * @param {Array<object>|undefined} refunds Stored refund entries.
- * @returns {Array<object>} The dashboard projection.
- */
 function toRefundLines(refunds) {
   if (!Array.isArray(refunds)) return [];
   return refunds.map((entry) => ({
@@ -73,10 +36,6 @@ function toRefundLines(refunds) {
   }));
 }
 
-/**
- * @param {object} document A `donations` document.
- * @returns {object} The dashboard projection.
- */
 export function toDonationResponse(document) {
   return {
     id: document._id,
@@ -96,10 +55,6 @@ export function toDonationResponse(document) {
   };
 }
 
-/**
- * @param {object} document An `orders` document.
- * @returns {object} The dashboard projection.
- */
 export function toOrderResponse(document) {
   return {
     id: document._id,
@@ -122,11 +77,6 @@ export function toOrderResponse(document) {
   };
 }
 
-/**
- * @param {{ db: import('mongodb').Db, config: object, logger?: object, nmi?: object,
- *           grants?: object }} deps Dependencies.
- * @returns {object} The admin commerce service.
- */
 export function createAdminCommerceService({
   db,
   config,
@@ -140,7 +90,6 @@ export function createAdminCommerceService({
   const gateway = nmi ?? nmiClient(logger);
   const grantsService = grants ?? createGrantsService({ db, config, logger });
 
-  /** The threshold above which two people are required. */
   function dualAuthorizationCents() {
     const configured = config.commerce?.refundDualAuthorizationCents;
     return Number.isInteger(configured) && configured >= 0
@@ -148,12 +97,6 @@ export function createAdminCommerceService({
       : DEFAULT_DUAL_AUTHORIZATION_CENTS;
   }
 
-  /**
-   * Build a date-range filter for a listing.
-   *
-   * @param {object} query The validated query string.
-   * @returns {object} A Mongo filter fragment.
-   */
   function rangeFilter(query) {
     const range = {};
     if (query.from) range.$gte = new Date(query.from);
@@ -161,13 +104,6 @@ export function createAdminCommerceService({
     return Object.keys(range).length > 0 ? { createdAt: range } : {};
   }
 
-  /**
-   * Has a *different* administrator already authorised this exact refund?
-   *
-   * @param {{ action: string, targetId: string, amountCents: number, adminId: string }} input
-   *        Authorisation facts.
-   * @returns {Promise<object|null>} The prior authorisation, or null.
-   */
   async function findPriorAuthorization({ action, targetId, amountCents, adminId }) {
     const since = new Date(Date.now() - AUTHORIZATION_WINDOW_MS);
     const [entry] = await auditLog
@@ -186,13 +122,6 @@ export function createAdminCommerceService({
     return entry ?? null;
   }
 
-  /**
-   * Return money through the gateway, falling back to a void when the sale has not settled.
-   *
-   * @param {{ transactionId: string, amountCents: number, full: boolean }} input Refund facts.
-   * @returns {Promise<{ result: object, kind: 'refund'|'void' }>} What the gateway did.
-   * @throws {ApiError} 502 when neither path succeeds.
-   */
   async function returnFunds({ transactionId, amountCents, full }) {
     let result;
     try {
@@ -203,8 +132,6 @@ export function createAdminCommerceService({
     }
     if (result.status === 'approved') return { result, kind: 'refund' };
 
-    // An unsettled sale is voided rather than refunded (§6.8). Only a full reversal can be
-    // a void, so a partial request never silently becomes one.
     if (full && UNSETTLED_PATTERN.test(result.responseText ?? '')) {
       const voided = await gateway.voidTransaction({ transactionId });
       if (voided.status === 'approved') return { result: voided, kind: 'void' };
@@ -213,14 +140,6 @@ export function createAdminCommerceService({
     throw new ApiError(502, 'REFUND_FAILED', 'The gateway did not complete that refund.');
   }
 
-  /**
-   * The shared refund path. The two workflows call it with their own collection, their own
-   * audit action and their own after-effects; nothing about the money is shared between
-   * them beyond this function's mechanics.
-   *
-   * @param {object} input Refund input.
-   * @returns {Promise<{ refund: object }>} The outcome.
-   */
   async function refund({
     admin,
     record,
@@ -364,18 +283,12 @@ export function createAdminCommerceService({
   }
 
   return {
-    /* ----------------------- workflow A — contributions ---------------------- */
 
-    /**
-     * @param {object} query The validated query string.
-     * @returns {Promise<{ donations: object[], total: number }>} The contribution ledger.
-     */
     async listDonations(query = {}) {
       const filter = { ...rangeFilter(query) };
       if (query.status) filter.status = query.status;
       if (query.kind) filter.kind = query.kind;
-      const limit = query.limit ?? 50;
-      const skip = query.offset ?? 0;
+      const { limit, skip } = toPaging(query);
       const [documents, count] = await Promise.all([
         donations.find(filter, { sort: { createdAt: -1 }, limit, skip }).toArray(),
         donations.countDocuments(filter),
@@ -383,15 +296,6 @@ export function createAdminCommerceService({
       return { donations: documents.map(toDonationResponse), total: count };
     },
 
-    /**
-     * `POST /admin/donations/:id/refund`.
-     *
-     * @param {object} admin The acting administrator.
-     * @param {string} id The contribution identifier.
-     * @param {object} body The validated body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ refund: object }>} The outcome.
-     */
     async refundDonation(admin, id, body, options = {}) {
       const record = await donations.findOne({ _id: id });
       if (!record) throw new ApiError(404, 'NOT_FOUND', 'That contribution does not exist.');
@@ -415,18 +319,11 @@ export function createAdminCommerceService({
       });
     },
 
-    /* ------------------------- workflow B — editions ------------------------- */
-
-    /**
-     * @param {object} query The validated query string.
-     * @returns {Promise<{ orders: object[], total: number }>} The sales ledger.
-     */
     async listOrders(query = {}) {
       const filter = { ...rangeFilter(query) };
       if (query.status) filter.status = query.status;
       if (query.type) filter.type = query.type;
-      const limit = query.limit ?? 50;
-      const skip = query.offset ?? 0;
+      const { limit, skip } = toPaging(query);
       const [documents, count] = await Promise.all([
         orders.find(filter, { sort: { createdAt: -1 }, limit, skip }).toArray(),
         orders.countDocuments(filter),
@@ -434,15 +331,6 @@ export function createAdminCommerceService({
       return { orders: documents.map(toOrderResponse), total: count };
     },
 
-    /**
-     * `POST /admin/orders/:id/refund`.
-     *
-     * @param {object} admin The acting administrator.
-     * @param {string} id The order identifier.
-     * @param {object} body The validated body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ refund: object }>} The outcome.
-     */
     async refundOrder(admin, id, body, options = {}) {
       const record = await orders.findOne({ _id: id });
       if (!record) throw new ApiError(404, 'NOT_FOUND', 'That order does not exist.');
@@ -469,16 +357,6 @@ export function createAdminCommerceService({
       });
     },
 
-    /**
-     * `POST /admin/orders/:id/fulfill`. Records a tracking number and ships the order.
-     * Fulfilment integration is out of Phase 1 scope beyond exactly this (§6.7).
-     *
-     * @param {object} admin The acting administrator.
-     * @param {string} id The order identifier.
-     * @param {{ trackingNumber: string, carrier?: string }} body The validated body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ order: object }>} The updated order.
-     */
     async fulfillOrder(admin, id, body, options = {}) {
       const record = await orders.findOne({ _id: id });
       if (!record) throw new ApiError(404, 'NOT_FOUND', 'That order does not exist.');

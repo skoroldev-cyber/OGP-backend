@@ -1,11 +1,3 @@
-/**
- * The rules that are not negotiable, asserted rather than trusted.
- *
- * Age routing, the sharing gate, and the prohibited-terms lint are all places where a quiet
- * regression would violate something the platform states publicly. These tests exist so that
- * "we do not do that" is a fact about the code rather than an intention.
- */
-
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -31,10 +23,6 @@ import {
 } from '../src/lib/rulesLint.js';
 import { parseNmiResponse, redactParams } from '../src/lib/nmiClient.js';
 
-/* ------------------------------------------------------------------ */
-/* Age routing (§4.4, verbatim)                                        */
-/* ------------------------------------------------------------------ */
-
 test('the age band routing map is the founder\'s, verbatim', () => {
   const expected = {
     '8-12': 'foundation',
@@ -56,31 +44,20 @@ test('the age band routing map is the founder\'s, verbatim', () => {
 });
 
 test('an unknown or absent band maps to no layer at all, never to a guess', () => {
-  // The routing function refuses to invent a band. Choosing what an unanswered prompt means is
-  // a policy decision, and it belongs to the session service (below), not to a lookup table —
-  // a silent guess here would be adaptation deciding something about a reader it was not told.
   for (const band of [null, undefined, '', 'unknown', '99+', 0, {}]) {
     assert.equal(layerForAgeBand(band), null, `band: ${String(band)}`);
   }
 });
 
 test('the session default for an unanswered prompt is the untouched full manuscript', () => {
-  // The age screen ships behind a flag that defaults OFF, and a no-answer path is offered when
-  // it is ON. Both land on `full_manuscript` — the only rendering certified today, and the one
-  // that serves the Opening Arc exactly as authored (§3.3, §1.5.2).
   assert.equal(DEFAULT_CONTENT_LAYER, 'full_manuscript');
 });
 
 test('the band vocabulary carries no birthdate and no gender', () => {
-  // §14.4.3: no gender question, no exact birthdate. Bands are ranges, and only ranges.
   for (const band of AGE_BANDS) {
     assert.match(band, /^\d+(-\d+|\+)$/, `"${band}" is not a range`);
   }
 });
-
-/* ------------------------------------------------------------------ */
-/* State vocabularies                                                  */
-/* ------------------------------------------------------------------ */
 
 test('the Phase 1 state machine is S0 through S14 and nothing else', () => {
   const values = Object.values(STATES);
@@ -109,13 +86,8 @@ test('the immersion sub-machine is the ten locked values', () => {
   assert.deepEqual([...PACE_MODES].sort(), ['deep', 'natural', 'paused', 'returning', 'slow']);
 });
 
-/* ------------------------------------------------------------------ */
-/* The sharing gate (§3.6.4, §3.7)                                     */
-/* ------------------------------------------------------------------ */
-
 const config = { flags: { sharingEnabled: true } };
 
-/** A session that has genuinely earned a share window: decompressed, nothing hazardous in play. */
 const eligibleSession = () => ({
   immersion_state: 'decompression',
   lastDecompressionAt: new Date(),
@@ -134,8 +106,6 @@ test('sharing opens only after recognition, reflection, decompression and regula
 });
 
 test('sharing is closed inside a no-share zone', () => {
-  // §14.4.4: sharing may never appear during trauma peaks — Chapter 1 sections 4, 5 and 7 and
-  // Chapter 00 parts 2-7 are tagged as no-share zones for exactly this reason.
   const facts = calmFacts();
   facts.units[0].isNoShareZoneInherited = true;
 
@@ -155,7 +125,6 @@ test('sharing is closed while a required decompression window is unpassed', () =
 });
 
 test('sharing is closed outside the permitted immersion states', () => {
-  // Mid-reading is not a share window. Neither is the moment of a recognition peak.
   for (const state of ['entry', 'orientation', 'reading', 'recognition']) {
     const session = eligibleSession();
     session.immersion_state = state;
@@ -180,8 +149,6 @@ test('a prompt is suppressed on a high-impact unit until decompression completes
 });
 
 test('frequency is rare: one system-initiated prompt per session', () => {
-  // §5.3 locks `frequency` to a single enum value. Once a prompt has been shown, the system
-  // does not ask again.
   const session = eligibleSession();
   session.promptsShown = 1;
 
@@ -200,8 +167,6 @@ test('the sharing feature flag closes the gate globally', () => {
 });
 
 test('"Become Family." requires a validated convergence threshold', () => {
-  // §8.10.2: the phrase appears rarely, only at validated convergence thresholds. An unvalidated
-  // node is not a threshold — human review is the gate.
   const facts = calmFacts();
   const session = eligibleSession();
   session.immersion_state = 'convergence';
@@ -213,7 +178,6 @@ test('"Become Family." requires a validated convergence threshold', () => {
 });
 
 test('the gate degrades closed on missing or malformed input', () => {
-  // A gate that fails open is worse than one that fails at all.
   for (const args of [
     { session: null, facts: null, config },
     { session: {}, facts: {}, config },
@@ -226,11 +190,6 @@ test('the gate degrades closed on missing or malformed input', () => {
   }
 });
 
-/* ------------------------------------------------------------------ */
-/* Prohibited terms (rules.json, §14.4.1)                              */
-/* ------------------------------------------------------------------ */
-
-/** `findProhibitedTerms` returns { term, index, match } records; the term alone is enough here. */
 const termsIn = (text) => findProhibitedTerms(text).map((hit) => hit.term);
 
 test('rules.json is loaded whole: 17 terms, 13 mechanics, the threshold phrase', () => {
@@ -246,19 +205,14 @@ test('findProhibitedTerms catches banned copy', () => {
 });
 
 test('findProhibitedTerms respects word boundaries', () => {
-  // "converted" is a legitimate internal order state; "conversion" is not the banned word.
-  // Flagging them would push authors to work around the lint rather than with it.
   assert.deepEqual(termsIn('The reservation was converted to an order.'), []);
   assert.deepEqual(termsIn('joint effort'), []);
   assert.deepEqual(termsIn('enlistment'), []);
 
-  // But the bare words are caught.
   assert.deepEqual(termsIn('convert the reader'), ['convert']);
 });
 
 test('an overlapping phrase is reported once, at its longest match', () => {
-  // "join us" contains "join". Reporting both would double-count one offence and make the CI
-  // output read as though there were two separate problems to fix.
   assert.deepEqual(termsIn('join us'), ['join us']);
   assert.deepEqual(termsIn('Join now'), ['join now']);
   assert.deepEqual(termsIn('join'), ['join']);
@@ -294,17 +248,11 @@ test('assertCleanCopy throws on banned copy and passes clean copy', () => {
 });
 
 test('the family pathway may not use member, membership, join or sign up', () => {
-  // §9.2.10, locked: the collection name is internal; every UI string on this pathway is the
-  // threshold phrase and nothing else.
   assert.throws(() => assertCleanFamilyCopy('Become a Global Family Member'));
   assert.throws(() => assertCleanFamilyCopy('Your membership is confirmed'));
   assert.doesNotThrow(() => assertCleanFamilyCopy('Become Family.'));
   assert.doesNotThrow(() => assertCleanFamilyCopy('Continue with the One Global Family.'));
 });
-
-/* ------------------------------------------------------------------ */
-/* NMI response parsing (§6.5.3)                                       */
-/* ------------------------------------------------------------------ */
 
 test('an approved sale parses as approved', () => {
   const parsed = parseNmiResponse(
@@ -319,7 +267,6 @@ test('an approved sale parses as approved', () => {
 });
 
 test('a decline parses as declined, not as an error', () => {
-  // The distinction matters to the reader: a decline is "try another card", an error is ours.
   const parsed = parseNmiResponse(
     'response=2&responsetext=DECLINE&transactionid=9876543211&response_code=200',
   );
@@ -357,7 +304,6 @@ test('the security key and card data never survive redaction', () => {
   assert.ok(!serialised.includes('4111111111111111'), 'a card number leaked');
   assert.ok(!serialised.includes('123456'), 'a CVV leaked');
 
-  // Non-sensitive fields survive, or the redacted record would be useless for debugging.
   assert.equal(redacted.amount, '25.00');
   assert.equal(redacted.orderid, 'ord_1');
 });

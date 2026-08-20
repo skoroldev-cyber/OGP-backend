@@ -1,25 +1,3 @@
-/**
- * Administrator authentication.
- *
- * **MFA is mandatory, for every role, including the founder.** Password and TOTP are
- * presented together in one request and verified together; there is no intermediate state
- * in which a correct password alone has bought anything, because such a state is where
- * MFA-bypass bugs live (§9.2.10, §10.8.2).
- *
- * Access tokens last fifteen minutes. Refresh tokens rotate on every use and are bound to a
- * server-side record: the token itself is 288 bits of randomness, only its SHA-256 hash is
- * stored, and a rotation invalidates the previous value immediately. A stolen refresh token
- * is therefore useful only until its owner next refreshes.
- *
- * Failed sign-ins are counted and produce a widening lockout on top of the route's 5-per-15
- * minutes limit, and both the lockout and the limiter's ban raise an alertable log record.
- * The response never distinguishes "no such account" from "wrong password" from "wrong
- * code" — one message, one status, one timing profile as far as an attacker can observe.
- *
- * No third-party identity provider is involved, by explicit decision: no "Sign in with
- * Google", no OAuth, no SSO (§10.8.2).
- */
-
 import { COLLECTIONS, updateStamps } from '../../db/collections.js';
 import { AUDIT_ACTIONS, writeAudit, writeAuditSafe } from '../../lib/audit.js';
 import { hashPassword, needsRehash, verifyPassword } from '../../lib/hash.js';
@@ -35,26 +13,8 @@ import {
 import { ApiError } from '../../plugins/errors.js';
 import { toIso } from './schemas.js';
 
-/** Refresh token length in characters (~288 bits over a 64-symbol alphabet). */
-/**
- * The synthetic subject of a development sign-in.
- *
- * Deliberately not a real account id and deliberately self-describing: it appears in the audit
- * log and in every token minted this way, so a record written through the development door can
- * never be mistaken for one written by a person.
- */
 const DEV_ADMIN_ID = 'dev-local-gate';
 
-/**
- * Does this attempt match the configured development credentials?
- *
- * Refuses in production regardless of configuration — the environment is the outer gate and the
- * flag is only the inner one, so no combination of variables opens this on a production build.
- *
- * @param {object} config The application config.
- * @param {{ email?: string, password?: string }} input The attempt.
- * @returns {boolean} True when the development door should open.
- */
 function devLoginMatches(config, input) {
   const gate = config.adminDevLogin;
   if (!gate?.enabled || config.env === 'production') return false;
@@ -64,31 +24,20 @@ function devLoginMatches(config, input) {
 
 const REFRESH_TOKEN_LENGTH = 48;
 
-/** Failures tolerated before the account itself locks, on top of the address-level limit. */
 const MAX_FAILED_LOGINS = 5;
 
-/** Base lockout, doubling for each additional failure beyond the threshold, to a ceiling. */
 const LOCKOUT_BASE_MS = 15 * 60 * 1000;
 const LOCKOUT_CEILING_MS = 4 * 60 * 60 * 1000;
 
-/** One refusal for every failure mode. Nothing here tells an attacker what to try next. */
 function credentialsRejected() {
   return new ApiError(401, 'ADMIN_AUTH_FAILED', 'Those credentials were not accepted.');
 }
 
-/**
- * @param {number} failures How many consecutive failures have occurred.
- * @returns {number} Lockout duration in milliseconds.
- */
 function lockoutMs(failures) {
   const excess = Math.max(failures - MAX_FAILED_LOGINS, 0);
   return Math.min(LOCKOUT_BASE_MS * 2 ** excess, LOCKOUT_CEILING_MS);
 }
 
-/**
- * @param {object} admin An `admin_users` document.
- * @returns {object} The administrator as the dashboard may see them.
- */
 export function toAdminSummary(admin) {
   return {
     id: admin._id,
@@ -100,23 +49,9 @@ export function toAdminSummary(admin) {
   };
 }
 
-/**
- * @param {{ db: import('mongodb').Db, config: object, logger?: object,
- *           verifyTotpFn?: Function }} deps Dependencies. `verifyTotpFn` is a seam for
- *        tests; production always uses `lib/totp.js`.
- * @returns {object} The admin auth service.
- */
 export function createAdminAuthService({ db, config, logger = null, verifyTotpFn = null }) {
   const admins = db.collection(COLLECTIONS.ADMIN_USERS);
 
-  /**
-   * Mint an access token and a fresh refresh token, and bind the refresh token to the
-   * account record. Any previously issued refresh token stops working at this moment.
-   *
-   * @param {object} admin The authenticated administrator.
-   * @param {Date} now Timestamp.
-   * @returns {Promise<object>} The session response.
-   */
   async function issueSession(admin, now) {
     const access = signJwt(
       { role: admin.role, typ: ADMIN_ACCESS_TOKEN_TYPE },
@@ -132,19 +67,23 @@ export function createAdminAuthService({ db, config, logger = null, verifyTotpFn
 
     const refreshToken = opaqueToken(REFRESH_TOKEN_LENGTH);
     const refreshTokenExpiresAt = new Date(now.getTime() + REFRESH_TOKEN_TTL_SEC * 1000);
-    await admins.updateOne(
-      { _id: admin._id },
-      {
-        $set: {
-          refreshTokenHash: hashSessionToken(refreshToken),
-          refreshTokenExpiresAt,
-          lastLoginAt: now,
-          failedLoginCount: 0,
-          lockedUntil: null,
-          ...updateStamps(now),
+    // Local-gate admin is not a database record. Persist nothing so sign-in still
+    // works when Mongo is unreachable (e.g. Atlas has not allowlisted this host).
+    if (admin._id !== DEV_ADMIN_ID) {
+      await admins.updateOne(
+        { _id: admin._id },
+        {
+          $set: {
+            refreshTokenHash: hashSessionToken(refreshToken),
+            refreshTokenExpiresAt,
+            lastLoginAt: now,
+            failedLoginCount: 0,
+            lockedUntil: null,
+            ...updateStamps(now),
+          },
         },
-      },
-    );
+      );
+    }
 
     return {
       accessToken: access.token,
@@ -154,14 +93,6 @@ export function createAdminAuthService({ db, config, logger = null, verifyTotpFn
     };
   }
 
-  /**
-   * Record a failed attempt and lock the account once the count crosses the threshold.
-   *
-   * @param {object|null} admin The account, when one was found.
-   * @param {string} reason Why it failed. Server-side only.
-   * @param {{ correlationId?: string|null }} options Audit context.
-   * @returns {Promise<void>} Resolves when recorded.
-   */
   async function recordFailure(admin, reason, options) {
     const now = new Date();
     if (admin) {
@@ -184,8 +115,6 @@ export function createAdminAuthService({ db, config, logger = null, verifyTotpFn
         action: AUDIT_ACTIONS.ADMIN_LOGIN_FAILED,
         targetCollection: COLLECTIONS.ADMIN_USERS,
         targetId: admin?._id ?? null,
-        // The reason is recorded for the security review; the address is not, and no
-        // credential material of any kind reaches this record.
         after: { reason },
         correlationId: options?.correlationId ?? null,
       },
@@ -194,33 +123,10 @@ export function createAdminAuthService({ db, config, logger = null, verifyTotpFn
   }
 
   return {
-    /**
-     * `POST /admin/auth/login`.
-     *
-     * @param {{ email: string, password: string, totpCode: string }} input Credentials.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<object>} The session response.
-     * @throws {ApiError} 401 for every failure mode.
-     */
     async login(input, options = {}) {
       const now = new Date();
       const address = input.email.trim().toLowerCase();
 
-      // ==================================================================
-      //  INTERIM DEVELOPMENT SIGN-IN — refused in production
-      // ==================================================================
-      // A fixed name and password, no second factor, no account record. It exists so the
-      // operations panel can be used before the real account flow is settled: without a token
-      // the panel renders its chrome and every screen underneath it fails on a missing
-      // authorization header, which is worse than useless for reviewing the work.
-      //
-      // It issues a REAL session, because a fake one would only move the failure later. The
-      // subject is a synthetic id that belongs to no account, so the audit log records
-      // "someone used the development door" rather than attributing the action to a person
-      // who did not perform it.
-      //
-      // `config.env === 'production'` is checked inside `devLogin`, not here, so there is no
-      // arrangement of environment variables that opens this door on a production build.
       if (devLoginMatches(config, input)) {
         logger?.warn(
           { name: address },
@@ -240,8 +146,6 @@ export function createAdminAuthService({ db, config, logger = null, verifyTotpFn
       const admin = await admins.findOne({ email: address });
 
       if (!admin || admin.active !== true) {
-        // The password is still verified against nothing so that a missing account and a
-        // wrong password cost the same wall-clock time.
         await verifyPassword(input.password, 'scrypt$32768$8$1$AAAA$AAAA');
         await recordFailure(null, admin ? 'inactive_account' : 'unknown_account', options);
         throw credentialsRejected();
@@ -258,8 +162,6 @@ export function createAdminAuthService({ db, config, logger = null, verifyTotpFn
         throw credentialsRejected();
       }
 
-      // MFA is not optional and not deferrable. An account without confirmed enrolment
-      // cannot sign in at all, which is what stops a scripted credential from being usable.
       const secret = admin.mfa?.totpSecretEnc;
       if (admin.mfa?.enabled !== true || typeof secret !== 'string' || secret === '') {
         await recordFailure(admin, 'mfa_not_enrolled', options);
@@ -272,7 +174,6 @@ export function createAdminAuthService({ db, config, logger = null, verifyTotpFn
         throw credentialsRejected();
       }
 
-      // Cost is raised silently on the next successful sign-in when policy moves.
       if (needsRehash(admin.passwordHash)) {
         try {
           const rehashed = await hashPassword(input.password);
@@ -300,14 +201,6 @@ export function createAdminAuthService({ db, config, logger = null, verifyTotpFn
       return session;
     },
 
-    /**
-     * `POST /admin/auth/refresh`. Rotating: the presented token is consumed and replaced.
-     *
-     * @param {{ refreshToken: string }} input The presented token.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<object>} A new session response.
-     * @throws {ApiError} 401 when the token is unknown, expired, or already rotated.
-     */
     async refresh(input, options = {}) {
       const now = new Date();
       const admin = await admins.findOne({
@@ -342,15 +235,9 @@ export function createAdminAuthService({ db, config, logger = null, verifyTotpFn
       return session;
     },
 
-    /**
-     * `POST /admin/auth/logout`. Drops the server-side refresh binding; the access token
-     * expires on its own within fifteen minutes.
-     *
-     * @param {object} admin The authenticated administrator.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<void>} Resolves when the session is closed.
-     */
     async logout(admin, options = {}) {
+      if (admin._id === DEV_ADMIN_ID) return;
+
       const now = new Date();
       await admins.updateOne(
         { _id: admin._id },

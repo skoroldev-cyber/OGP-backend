@@ -1,14 +1,3 @@
-/**
- * Typed environment loading.
- *
- * Every variable consumed here appears in `Backend/.env.example`; nothing outside that
- * file is required to boot. In production the loader fails fast and loudly: a missing or
- * placeholder secret must never degrade into a silent default.
- *
- * Secrets are read here and nowhere else. No secret value is ever logged, echoed in an
- * error message, or attached to a response.
- */
-
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 
@@ -21,16 +10,12 @@ const VALID_EMAIL_TRANSPORTS = ['log', 'smtp'];
 const MIN_SECRET_LENGTH = 32;
 const PLACEHOLDER_MARKERS = ['change-me', 'changeme', 'replace-me', 'your-secret'];
 
-/** Session lifetime: 400 days after last read (§9.5 retention, founder review pending). */
 const SESSION_TTL_DAYS = 400;
 
-/** Raw JSON body ceiling. The largest legitimate request is a 20-event batch. */
 const BODY_LIMIT_BYTES = 128 * 1024;
 
-/** How long graceful shutdown may take before the process is forced down. */
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
-/** Webhook signature clock-skew tolerance (§9.6). */
 const WEBHOOK_TOLERANCE_SECONDS = 300;
 
 function deepFreeze(value) {
@@ -139,13 +124,6 @@ function requirePresent(value, key, { isProduction, problems }) {
   return value;
 }
 
-/**
- * Build the configuration object from an environment bag.
- *
- * @param {Record<string, string|undefined>} [env] Defaults to `process.env`.
- * @returns {Readonly<object>} A deeply frozen configuration object.
- * @throws {Error} When production requirements are unmet.
- */
 export function loadConfig(env = process.env) {
   const problems = [];
   const warnings = [];
@@ -272,15 +250,8 @@ export function loadConfig(env = process.env) {
   if (emailTransport === 'log' && isProduction) {
     warnings.push('EMAIL_TRANSPORT is "log" in production — no message will reach a recipient.');
   }
-  // Submission hosts frequently require an envelope sender they have verified, which is not
-  // always the address a reader should reply to. When SMTP_FROM is empty the two are the same.
   const smtpFrom = readString(env, 'SMTP_FROM', '');
 
-  /**
-   * The reader-facing path of a private reading link: `PUBLIC_ORIGIN + INVITE_PATH + ?fr=`
-   * (`modules/admin/templates.js`). Defaults to `/`, which sends a Founding Reader to the
-   * site root carrying their code.
-   */
   const invitePath = readString(env, 'INVITE_PATH', '/');
   if (!/^\/[A-Za-z0-9/_-]*$/.test(invitePath)) {
     problems.push(
@@ -295,9 +266,6 @@ export function loadConfig(env = process.env) {
     sharingEnabled: readBoolean(env, 'SHARING_ENABLED', true, problems),
   };
 
-  // Interim operations sign-in. See src/modules/admin/auth.js — it issues a real session for a
-  // fixed name and password with no second factor, and it is refused outright when
-  // NODE_ENV=production, so the flag alone can never open it on a production build.
   const adminDevLogin = {
     enabled: !isProduction && readBoolean(env, 'ADMIN_DEV_LOGIN', true, problems),
     name: readString(env, 'ADMIN_DEV_NAME', 'admin').trim().toLowerCase(),
@@ -349,8 +317,6 @@ export function loadConfig(env = process.env) {
     port,
     logLevel,
 
-    /** Indexes and validators are applied on boot everywhere except production, where
-     *  `npm run db:indexes` runs as an explicit, reviewable deployment step. */
     autoIndex: !isProduction,
     applyValidators: !isProduction,
 
@@ -422,7 +388,6 @@ export function loadConfig(env = process.env) {
 
 dotenv.config({ path: ENV_FILE, quiet: true });
 
-/** The process-wide configuration. Import this everywhere; never read `process.env` directly. */
 export const config = loadConfig();
 
 export default config;

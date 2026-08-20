@@ -1,49 +1,19 @@
-/**
- * Founding Reader programme administration — cohorts, invitations and the Airtable bridge.
- *
- * Beta participants are the one class of named humans in the platform. Their records exist
- * under explicit study consent, and this module is the only place that reads them in bulk.
- * Two boundaries hold throughout:
- *
- * 1. **A participant is never a reading trail.** `redeemedBySessionId` exists so a cohort
- *    funnel can be counted; it is not projected by any response in this module, so no
- *    dashboard view can pivot from a named person to what they read (§10.2).
- * 2. **One welcome, one link, one message.** `send-welcome` carries the private reading
- *    link, stamps both funnel columns, and is idempotent by status: a second call to a
- *    participant who already has their link sends nothing. There is no reminder sequence,
- *    because a reminder sequence is a drip campaign wearing a study's clothes.
- *
- * The interim operating mode is canon: LinkedIn post → email → Airtable → welcome →
- * private reading link → questionnaire (§10.7.1). Until cutover this module accepts a
- * one-way CSV import from that table, deduplicated by email address. Import never deletes,
- * never overwrites a later funnel state with an earlier one, and never invents consent.
- */
-
 import { SCHEMA_VERSION } from '../../config/constants.js';
 import { COLLECTIONS, creationStamps, updateStamps } from '../../db/collections.js';
 import { AUDIT_ACTIONS, writeAudit } from '../../lib/audit.js';
 import { newId, opaqueToken } from '../../lib/ids.js';
 import { createMailer } from '../../lib/mailer.js';
+import { toPaging } from '../../lib/schemas.js';
 import { ApiError } from '../../plugins/errors.js';
 import { toInteger, toIso } from './schemas.js';
 import { buildInvitationUrl } from './templates.js';
 
-/** Audit actions this module writes that `lib/audit.js` does not already name. */
 export const BETA_AUDIT_ACTIONS = Object.freeze({
   COHORT_CREATE: 'cohort.create',
   INVITATION_UPDATE: 'invitation.update',
   INVITATION_IMPORT: 'invitation.import',
 });
 
-/**
- * Statuses at or beyond "approved", in funnel order.
- *
- * The platform's own delivery states are ranked alongside the Airtable ones (see
- * `INVITATION_STATUSES`): `invited` is what the dashboard writes when it sends a private
- * reading link, and `reading_link_sent` is what an Airtable import writes for the same
- * event. They must count as the same rung, or a cohort's funnel would read differently
- * depending on which system recorded the send.
- */
 const APPROVED_OR_LATER = Object.freeze([
   'approved',
   'invited',
@@ -64,7 +34,6 @@ const LINK_SENT_OR_LATER = Object.freeze([
 
 const REDEEMED_OR_LATER = Object.freeze(['redeemed', 'questionnaire_completed']);
 
-/** Statuses from which the welcome has already gone out. */
 const WELCOMED_STATUSES = Object.freeze([
   'invited',
   'welcome_sent',
@@ -74,7 +43,6 @@ const WELCOMED_STATUSES = Object.freeze([
   'questionnaire_completed',
 ]);
 
-/** Airtable's exact status strings (§10.7.2) mapped onto the stored vocabulary. */
 export const AIRTABLE_STATUS_MAP = Object.freeze({
   'new interest': 'new_interest',
   approved: 'approved',
@@ -87,7 +55,6 @@ export const AIRTABLE_STATUS_MAP = Object.freeze({
   'not selected': 'not_selected',
 });
 
-/** Airtable column headings mapped onto stored fields. Case- and spacing-insensitive. */
 const CSV_COLUMN_MAP = Object.freeze({
   firstname: 'firstName',
   lastname: 'lastName',
@@ -108,26 +75,12 @@ const CSV_COLUMN_MAP = Object.freeze({
 
 const SOURCE_VALUES = Object.freeze(['linkedin', 'email', 'org', 'direct']);
 
-/** Invitation code length. Opaque, single-use, and typable for organisation cohorts. */
 const INVITATION_CODE_LENGTH = 21;
 
-/**
- * Escape a coordinator's search text so a stray `(` or `*` is a character to find rather
- * than a pattern to run.
- *
- * @param {string} value The raw search text.
- * @returns {string} A literal-matching pattern.
- */
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/**
- * Mint an invitation code that satisfies the reader-facing code pattern (which requires an
- * alphanumeric first character).
- *
- * @returns {string} The code.
- */
 export function mintInvitationCode() {
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const candidate = opaqueToken(INVITATION_CODE_LENGTH);
@@ -136,14 +89,6 @@ export function mintInvitationCode() {
   return `R${opaqueToken(INVITATION_CODE_LENGTH - 1)}`;
 }
 
-/**
- * Parse RFC 4180-ish CSV text. Quoted fields, doubled quotes, CRLF or LF line endings.
- * Deliberately small: the alternative is a dependency, and the locked dependency set has
- * no room for one.
- *
- * @param {string} text The CSV document.
- * @returns {string[][]} Rows of fields.
- */
 export function parseCsv(text) {
   const rows = [];
   let row = [];
@@ -201,12 +146,6 @@ export function parseCsv(text) {
   return rows.filter((entry) => entry.some((value) => value.trim() !== ''));
 }
 
-/**
- * Interpret an Airtable cell that may hold a date, a checkbox, or nothing.
- *
- * @param {string|undefined} value The cell.
- * @returns {Date|null} A timestamp, or null.
- */
 function toStamp(value) {
   const text = String(value ?? '').trim();
   if (text === '') return null;
@@ -217,10 +156,6 @@ function toStamp(value) {
   return Number.isNaN(parsed.getTime()) ? new Date(0) : parsed;
 }
 
-/**
- * @param {object} document A `cohorts` document.
- * @returns {object} The dashboard projection.
- */
 export function toCohortResponse(document) {
   return {
     id: document._id,
@@ -237,10 +172,6 @@ export function toCohortResponse(document) {
   };
 }
 
-/**
- * @param {object} document An `invitations` document.
- * @returns {object} The dashboard projection. Carries no session reference.
- */
 export function toInvitationResponse(document) {
   return {
     id: document._id,
@@ -257,8 +188,6 @@ export function toInvitationResponse(document) {
     welcomeEmailSentAt: toIso(document.welcomeEmailSentAt),
     readingLinkSentAt: toIso(document.readingLinkSentAt),
     sentAt: toIso(document.sentAt),
-    // Internal operational counter, never rendered to a reader (§14.4.4 governs the reader
-    // experience, not a coordinator's queue).
     sendCount: toInteger(document.sendCount, 0),
     lastError: document.lastError ?? null,
     revokedAt: toIso(document.revokedAt),
@@ -268,33 +197,17 @@ export function toInvitationResponse(document) {
   };
 }
 
-/**
- * @param {{ db: import('mongodb').Db, config: object, logger?: object, mailer?: object }}
- *        deps Dependencies.
- * @returns {object} The admin beta service.
- */
 export function createAdminBetaService({ db, config, logger = null, mailer = null }) {
   const cohorts = db.collection(COLLECTIONS.COHORTS);
   const invitations = db.collection(COLLECTIONS.INVITATIONS);
   const mail = mailer ?? createMailer({ logger });
 
-  /**
-   * @param {string} id A cohort `_id`.
-   * @returns {Promise<object>} The cohort.
-   * @throws {ApiError} 404 when it does not exist.
-   */
   async function requireCohort(id) {
     const cohort = await cohorts.findOne({ _id: id });
     if (!cohort) throw new ApiError(404, 'NOT_FOUND', 'That cohort does not exist.');
     return cohort;
   }
 
-  /**
-   * Count the funnel for one cohort, in a single pass.
-   *
-   * @param {string} cohortId The cohort identifier.
-   * @returns {Promise<object>} The funnel counts.
-   */
   async function funnelFor(cohortId) {
     const [row] = await invitations
       .aggregate([
@@ -343,17 +256,10 @@ export function createAdminBetaService({ db, config, logger = null, mailer = nul
   return {
     funnelFor,
 
-    /* -------------------------------- cohorts -------------------------------- */
-
-    /**
-     * @param {object} query The validated query string.
-     * @returns {Promise<{ cohorts: object[], total: number }>} The listing.
-     */
     async listCohorts(query = {}) {
       const filter = {};
       if (query.status) filter.status = query.status;
-      const limit = query.limit ?? 50;
-      const skip = query.offset ?? 0;
+      const { limit, skip } = toPaging(query);
       const [documents, count] = await Promise.all([
         cohorts.find(filter, { sort: { createdAt: -1 }, limit, skip }).toArray(),
         cohorts.countDocuments(filter),
@@ -361,12 +267,6 @@ export function createAdminBetaService({ db, config, logger = null, mailer = nul
       return { cohorts: documents.map(toCohortResponse), total: count };
     },
 
-    /**
-     * @param {object} admin The acting administrator.
-     * @param {object} input The validated body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ cohort: object }>} The created cohort.
-     */
     async createCohort(admin, input, options = {}) {
       const now = new Date();
       const document = {
@@ -404,13 +304,6 @@ export function createAdminBetaService({ db, config, logger = null, mailer = nul
       return { cohort: toCohortResponse(document) };
     },
 
-    /**
-     * @param {object} admin The acting administrator.
-     * @param {string} id The cohort identifier.
-     * @param {object} input The validated body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ cohort: object }>} The updated cohort.
-     */
     async updateCohort(admin, id, input, options = {}) {
       const cohort = await requireCohort(id);
       const now = new Date();
@@ -447,12 +340,6 @@ export function createAdminBetaService({ db, config, logger = null, mailer = nul
       return { cohort: toCohortResponse(updated) };
     },
 
-    /**
-     * `GET /admin/cohorts/:id/summary`.
-     *
-     * @param {string} id The cohort identifier.
-     * @returns {Promise<object>} The cohort funnel.
-     */
     async cohortSummary(id) {
       const cohort = await requireCohort(id);
       return {
@@ -463,19 +350,6 @@ export function createAdminBetaService({ db, config, logger = null, mailer = nul
       };
     },
 
-    /* ------------------------------ invitations ------------------------------ */
-
-    /**
-     * `GET /admin/invitations?cohortId&status&q&page` — the invitation status list.
-     *
-     * `q` matches an address, a name or a code. It is a regular expression rather than a
-     * text index because the search a coordinator actually performs is "the person who wrote
-     * to us last week, something with a k in it" over a collection sized 50–200 (§5.7), and a
-     * text index would answer that worse.
-     *
-     * @param {object} query The validated query string.
-     * @returns {Promise<{ invitations: object[], total: number }>} The listing.
-     */
     async listInvitations(query = {}) {
       const filter = {};
       if (query.cohortId) filter.cohortId = query.cohortId;
@@ -489,12 +363,9 @@ export function createAdminBetaService({ db, config, logger = null, mailer = nul
         ];
       }
 
-      const limit = query.limit ?? 50;
-      // `page` is the dashboard's vocabulary and `offset` is the API's. A page wins when both
-      // arrive, because a client that sends a page number is paging.
-      const skip = Number.isInteger(query.page) && query.page > 0
-        ? (query.page - 1) * limit
-        : query.offset ?? 0;
+      // `invitationsQuery` is a plain `listQuery`, so it carries `offset` and no `page`; the
+      // page-based branch that used to sit here could never run.
+      const { limit, skip } = toPaging(query);
 
       const [documents, count] = await Promise.all([
         invitations.find(filter, { sort: { createdAt: -1 }, limit, skip }).toArray(),
@@ -503,12 +374,6 @@ export function createAdminBetaService({ db, config, logger = null, mailer = nul
       return { invitations: documents.map(toInvitationResponse), total: count };
     },
 
-    /**
-     * @param {object} admin The acting administrator.
-     * @param {object} input The validated body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ invitation: object }>} The created invitation.
-     */
     async createInvitation(admin, input, options = {}) {
       const now = new Date();
       const document = {
@@ -550,13 +415,6 @@ export function createAdminBetaService({ db, config, logger = null, mailer = nul
       return { invitation: toInvitationResponse(document) };
     },
 
-    /**
-     * @param {object} admin The acting administrator.
-     * @param {string} id The invitation identifier.
-     * @param {object} input The validated body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ invitation: object }>} The updated invitation.
-     */
     async updateInvitation(admin, id, input, options = {}) {
       const invitation = await invitations.findOne({ _id: id });
       if (!invitation) throw new ApiError(404, 'NOT_FOUND', 'That invitation does not exist.');
@@ -595,18 +453,6 @@ export function createAdminBetaService({ db, config, logger = null, mailer = nul
       return { invitation: toInvitationResponse(updated) };
     },
 
-    /**
-     * `POST /admin/invitations/:id/send-welcome`.
-     *
-     * The welcome carries the private reading link, so both funnel stamps advance together.
-     * The manuscript is never attached — a private link only (§14.4.5). A participant who
-     * already holds their link is not messaged again.
-     *
-     * @param {object} admin The acting administrator.
-     * @param {string} id The invitation identifier.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ invitation: object, delivered: boolean }>} The result.
-     */
     async sendWelcome(admin, id, options = {}) {
       const invitation = await invitations.findOne({ _id: id });
       if (!invitation) throw new ApiError(404, 'NOT_FOUND', 'That invitation does not exist.');
@@ -614,7 +460,6 @@ export function createAdminBetaService({ db, config, logger = null, mailer = nul
         throw new ApiError(422, 'NO_ADDRESS', 'That invitation has no address to write to.');
       }
       if (WELCOMED_STATUSES.includes(invitation.status)) {
-        // Not an error, and not a second message. The state is already what was asked for.
         return { invitation: toInvitationResponse(invitation), delivered: false };
       }
 
@@ -622,8 +467,6 @@ export function createAdminBetaService({ db, config, logger = null, mailer = nul
         ? await cohorts.findOne({ _id: invitation.cohortId }, { projection: { name: 1 } })
         : null;
 
-      // Tokenised per participant so completion tracking is automatic and a leaked link is
-      // individually revocable (§10.7.2).
       const readingUrl = buildInvitationUrl(config, invitation.code);
 
       let delivered = false;
@@ -671,15 +514,6 @@ export function createAdminBetaService({ db, config, logger = null, mailer = nul
       return { invitation: toInvitationResponse(updated), delivered };
     },
 
-    /**
-     * `POST /admin/beta/import` — the one-way Airtable bridge.
-     *
-     * @param {object} admin The acting administrator.
-     * @param {{ cohortId?: string, csv: string }} input The validated body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ imported: number, updated: number, skipped: number,
-     *                     errors: string[] }>} The import summary.
-     */
     async importInvitations(admin, input, options = {}) {
       if (input.cohortId) await requireCohort(input.cohortId);
 
@@ -743,8 +577,6 @@ export function createAdminBetaService({ db, config, logger = null, mailer = nul
         try {
           const existing = await invitations.findOne({ email: address });
           if (existing) {
-            // Never walk a participant backwards: an import is a mirror of an older system,
-            // and the platform's own record of a redemption is the newer truth.
             const currentRank = APPROVED_OR_LATER.indexOf(existing.status);
             const incomingRank = APPROVED_OR_LATER.indexOf(status);
             if (incomingRank > currentRank) set.status = status;

@@ -1,26 +1,4 @@
 #!/usr/bin/env node
-/**
- * Export the donation and order ledgers — separately, always.
- *
- * §6.4 is explicit: "Digital transcript access uses a donation workflow. Hardcover editions use
- * a product purchase workflow. These remain separate throughout the platform." Separation is
- * not a preference here. The Payarc merchant account is MCC 8398 — charitable — while hardcover
- * sales are product revenue, and commingling them creates a tax and card-network
- * misclassification problem that is far easier to avoid than to unwind.
- *
- * So this writes two files with two column sets and two numbering series, and there is no flag
- * that merges them.
- *
- * No card data is exported, because none exists to export: the platform never sees a card
- * number. The NMI transaction id is the only gateway reference, and it is the one an accountant
- * or a dispute response actually needs.
- *
- * Usage:
- *   node scripts/export-ledger.mjs [--from=2026-01-01] [--to=2026-12-31] [--out=./exports]
- *
- * @module scripts/export-ledger
- */
-
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -50,13 +28,6 @@ No card data is exported. The platform never holds any.
 const { flags } = parseArgs();
 helpIfAsked(flags, USAGE);
 
-/**
- * Parse a `YYYY-MM-DD` boundary.
- *
- * @param {unknown} value The flag value.
- * @param {string} label For the error message.
- * @returns {Date|null} The date, or null when absent.
- */
 function parseDate(value, label) {
   if (typeof value !== 'string') return null;
   const parsed = new Date(`${value}T00:00:00.000Z`);
@@ -68,18 +39,15 @@ const from = parseDate(flags.from, 'from');
 const to = parseDate(flags.to, 'to');
 const outDir = typeof flags.out === 'string' ? flags.out : path.join(process.cwd(), 'exports');
 
-/** Quote a CSV cell per RFC 4180. */
 function csvCell(value) {
   if (value === null || value === undefined) return '';
   const text = value instanceof Date ? value.toISOString() : String(value);
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-/** Render rows to CSV text with a trailing newline. */
 const toCsv = (headers, rows) =>
   [headers.join(','), ...rows.map((row) => row.map(csvCell).join(','))].join('\n') + '\n';
 
-/** Cents to a plain decimal string — never a float in a ledger. */
 const money = (cents) =>
   typeof cents === 'number' ? `${Math.trunc(cents / 100)}.${String(Math.abs(cents % 100)).padStart(2, '0')}` : '';
 
@@ -94,10 +62,6 @@ try {
   fs.mkdirSync(outDir, { recursive: true });
 
   const stamp = `${from ? from.toISOString().slice(0, 10) : 'start'}_${to ? to.toISOString().slice(0, 10) : 'now'}`;
-
-  /* ---------------------------------------------------------------- */
-  /* Donations — charitable receipts, MCC 8398                         */
-  /* ---------------------------------------------------------------- */
 
   const donations = await db
     .collection(COLLECTIONS.DONATIONS)
@@ -137,10 +101,6 @@ try {
   const donationFile = path.join(outDir, `donations_${stamp}.csv`);
   fs.writeFileSync(donationFile, toCsv(donationHeaders, donationRows), 'utf8');
 
-  /* ---------------------------------------------------------------- */
-  /* Orders — product revenue, a different ledger entirely             */
-  /* ---------------------------------------------------------------- */
-
   const orders = await db
     .collection(COLLECTIONS.ORDERS)
     .find(filter, { sort: { createdAt: 1 } })
@@ -172,16 +132,12 @@ try {
     order.currency ?? 'USD',
     order.status ?? '',
     order.nmi?.transactionId ?? '',
-    // The shipping country is needed for tax and freight. The street address is not, and is
-    // not exported.
     order.customer?.shippingAddress?.country ?? '',
     money((order.refunds ?? []).reduce((total, refund) => total + (refund.amountCents ?? 0), 0)),
   ]);
 
   const orderFile = path.join(outDir, `orders_${stamp}.csv`);
   fs.writeFileSync(orderFile, toCsv(orderHeaders, orderRows), 'utf8');
-
-  /* ---------------------------------------------------------------- */
 
   const sum = (rows, column) =>
     rows.reduce((total, row) => total + Number.parseFloat(row[column] || '0'), 0).toFixed(2);

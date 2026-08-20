@@ -1,19 +1,3 @@
-/**
- * Free-form reader feedback — capture, consent, and the review surface.
- *
- * The properties under test are the ones that would be expensive to discover late:
- *
- *  - The body is required and identity is not. A reader may write anonymously.
- *  - An email address exists on the record only when the reader consented to contact. Not
- *    "is hidden unless" — is *absent* unless, so no later projection can leak it.
- *  - A passage anchor is resolved against the governing release, and a mark naming content
- *    that no longer exists is dropped quietly rather than costing the reader their words.
- *  - The record carries no age band, no birthdate, no location, no network identity.
- *  - The founder's summary is an aggregate and has no shape in which a reader appears.
- *  - The CSV export is RFC 4180, because reader feedback contains commas, quotes and
- *    newlines constantly and a naive join would corrupt the file on the first submission.
- */
-
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -35,7 +19,6 @@ import {
 } from '../src/modules/admin/feedback.js';
 import { createMemoryDb } from './helpers/memory-db.js';
 
-/** A silent app over a fresh in-memory database. */
 async function makeApp() {
   const db = createMemoryDb();
   db.collection('reading_sessions').declareUnique(['tokenHash']);
@@ -49,7 +32,6 @@ async function makeApp() {
   return { app, db };
 }
 
-/** Create a session and return its bearer header. */
 async function newSession(app) {
   const response = await app.inject({ method: 'POST', url: '/api/v1/sessions', payload: {} });
   assert.equal(response.statusCode, 201, response.body);
@@ -57,11 +39,6 @@ async function newSession(app) {
   return { session, auth: { authorization: `Bearer ${sessionToken}` } };
 }
 
-/**
- * An enrolled administrator and a bearer header for them. The login route proves password
- * and TOTP; this mints the token that route would have issued, so the *authorisation* rules
- * can be exercised without rebuilding the credential ceremony in every test.
- */
 async function adminAuth(db, role = 'founder') {
   const id = '01JADMIN00000000000000000A';
   await db.collection(COLLECTIONS.ADMIN_USERS).insertOne({
@@ -84,17 +61,12 @@ async function adminAuth(db, role = 'founder') {
   return { authorization: `Bearer ${token}` };
 }
 
-/** A real unit identifier from the governing release. */
 async function anyUnitId(app) {
   const manifest = await app.inject({ method: 'GET', url: '/api/v1/manuscript/manifest?arc=opening' });
   assert.equal(manifest.statusCode, 200, manifest.body);
   const unit = manifest.json().units.find((entry) => entry.isReadingUnit);
   return unit.unitId;
 }
-
-/* ------------------------------------------------------------------ */
-/* Capture                                                             */
-/* ------------------------------------------------------------------ */
 
 test('feedback requires something written, and nothing else', async (t) => {
   const { app, db } = await makeApp();
@@ -120,7 +92,6 @@ test('feedback requires something written, and nothing else', async (t) => {
   assert.equal(blank.statusCode, 422, 'whitespace is not a submission');
   assert.equal(blank.json().error.code, 'FEEDBACK_EMPTY');
 
-  // Name and email are optional; the body alone is a complete submission.
   const anonymous = await app.inject({
     method: 'POST',
     url: '/api/v1/feedback',
@@ -166,7 +137,6 @@ test('an email is stored only when the reader consented to be contacted', async 
     'the address survived somewhere in the document',
   );
 
-  // The confirmation the reader sees does not echo an address the platform declined to keep.
   assert.ok(!withheld.body.includes('reader@example.org'));
 
   const consented = await app.inject({
@@ -214,7 +184,6 @@ test('a marked passage is anchored to the release, and an unknown mark is droppe
   assert.equal(feedback.kind, 'passage', 'the kind follows the marks, and is not client-declared');
   assert.equal(feedback.passages.length, 1, 'the stale mark was dropped, the submission survived');
   assert.equal(feedback.passages[0].unitId, unitId);
-  // Inverted offsets are normalised rather than refused — they still identify the passage.
   assert.equal(feedback.passages[0].charStart, 120);
   assert.equal(feedback.passages[0].charEnd, 400);
 
@@ -229,8 +198,6 @@ test('the feedback record carries nothing that could profile the reader', async 
 
   const { auth } = await newSession(app);
 
-  // A client that tries to attach profiling data is refused at the schema, not filtered
-  // afterwards — `additionalProperties: false` is the mechanism (§9.5).
   const attempt = await app.inject({
     method: 'POST',
     url: '/api/v1/feedback',
@@ -284,12 +251,9 @@ test('a reader can see what they sent, and no triage state', async (t) => {
   assert.equal(feedback[0].body, 'The contrast was hard for me at first.');
   assert.equal(feedback[0].category, 'accessibility');
 
-  // Triage is staff workflow. "Archived" is not something a person should read about their
-  // own words, so the reader-facing shape has nowhere to put it.
   assert.ok(!('status' in feedback[0]), 'triage state reached the reader');
   assert.ok(!('adminNotes' in feedback[0]), 'reviewer notes reached the reader');
 
-  // Another session sees none of it.
   const { auth: otherAuth } = await newSession(app);
   const others = await app.inject({
     method: 'GET',
@@ -299,11 +263,6 @@ test('a reader can see what they sent, and no triage state', async (t) => {
   assert.deepEqual(others.json().feedback, []);
 });
 
-/* ------------------------------------------------------------------ */
-/* Review surface                                                      */
-/* ------------------------------------------------------------------ */
-
-/** Seed the feedback collection directly; the admin service is exercised without HTTP. */
 function seedFeedback(db, entries) {
   const collection = db.collection(COLLECTIONS.FEEDBACK);
   return Promise.all(
@@ -344,8 +303,6 @@ test('the summary is an aggregate, with a stable axis and no reader in it', asyn
 
   assert.equal(summary.total, 3);
 
-  // Every category and every status is present, including the empty ones: a founder reading
-  // this needs the same axis every time, not one that changes shape with the data.
   assert.equal(summary.byCategory.length, FEEDBACK_CATEGORIES.length);
   assert.equal(summary.byStatus.length, FEEDBACK_STATUSES.length);
 
@@ -357,13 +314,11 @@ test('the summary is an aggregate, with a stable axis and no reader in it', asyn
   const status = Object.fromEntries(summary.byStatus.map((row) => [row.status, row.count]));
   assert.deepEqual(status, { new: 1, triaged: 1, actioned: 1, archived: 0 });
 
-  // One submission counts once against each unit it marked, and the busiest unit sorts first.
   assert.deepEqual(summary.byUnit, [
     { unitId: 'CU-A', count: 2 },
     { unitId: 'CU-B', count: 1 },
   ]);
 
-  // §10.2: aggregate only. Nothing here is keyed by a person.
   const serialised = JSON.stringify(summary);
   assert.ok(!serialised.includes('SESSION'), 'a session identifier reached the summary');
   assert.ok(!serialised.includes('sessionId'), 'the summary is grouped by reader somewhere');
@@ -385,11 +340,9 @@ test('the queue filters by unit, category, state and free text', async () => {
   assert.equal((await service.listFeedback({ cohortId: 'COHORT-1' })).total, 1);
   assert.equal((await service.listFeedback({ q: 'flint' })).total, 1, 'search is case-insensitive');
 
-  // A search string is text, not a pattern: a stray metacharacter must not become an operator.
   assert.equal((await service.listFeedback({ q: 'wrong.' })).total, 1);
   assert.equal((await service.listFeedback({ q: 'wrong!' })).total, 0);
 
-  // No projection on this surface carries the reading trail.
   const listing = await service.listFeedback({});
   assert.ok(!JSON.stringify(listing).includes('sessionId'));
 
@@ -424,8 +377,6 @@ test('triage records who changed what, and cannot edit what the reader wrote', a
   assert.equal(entries[0].before.status, 'new');
   assert.equal(entries[0].after.status, 'triaged');
 
-  // The trail records the decision, not the evidence: a reader's text is not copied into a
-  // second, longer-lived collection by the act of triaging it.
   assert.ok(!JSON.stringify(entries[0]).includes('This is what I actually said.'));
 
   await assert.rejects(
@@ -433,10 +384,6 @@ test('triage records who changed what, and cannot edit what the reader wrote', a
     /does not exist/,
   );
 });
-
-/* ------------------------------------------------------------------ */
-/* Export                                                              */
-/* ------------------------------------------------------------------ */
 
 test('CSV fields are escaped per RFC 4180', () => {
   assert.equal(csvField('plain'), 'plain');
@@ -484,10 +431,8 @@ test('the export carries contact details only where consent was given', async ()
 
   assert.ok(csv.includes('yes@example.org'));
   assert.ok(csv.includes('Consenting Reader'));
-  // A CSV leaves the platform. The name of a reader who declined contact does not go with it.
   assert.ok(!csv.includes('Withheld Reader'), 'a non-consenting reader was named in the export');
 
-  // The awkward body survives quoting intact.
   assert.ok(csv.includes('"Comma, quote "" and\nnewline all at once."'));
 
   const entries = await db.collection(COLLECTIONS.AUDIT_LOG).find({}).toArray();
@@ -507,7 +452,6 @@ test('the review routes are admin-only, and the export leaves as CSV rather than
     payload: { category: 'clarity', body: 'One line, with a comma, and a "quote".' },
   });
 
-  // A reader's session token opens nothing on the review surface.
   const asReader = await app.inject({ method: 'GET', url: '/api/v1/admin/feedback', headers: auth });
   assert.equal(asReader.statusCode, 401);
 
@@ -540,7 +484,6 @@ test('the review routes are admin-only, and the export leaves as CSV rather than
   assert.equal(triaged.statusCode, 200, triaged.body);
   assert.equal(triaged.json().feedback.status, 'triaged');
 
-  // The queue cannot rewrite the evidence.
   const rewrite = await app.inject({
     method: 'PATCH',
     url: `/api/v1/admin/feedback/${record.id}`,
@@ -558,8 +501,6 @@ test('the review routes are admin-only, and the export leaves as CSV rather than
   assert.match(exported.headers['content-type'], /^text\/csv/);
   assert.match(exported.headers['content-disposition'] ?? '', /filename="feedback\.csv"/);
 
-  // The whole point of sending a Buffer: a JSON serialiser would have wrapped and escaped
-  // the document, and every quoted field would arrive doubled again.
   assert.ok(exported.body.startsWith('id,submitted_at,'), exported.body.slice(0, 60));
   assert.ok(exported.body.includes('"One line, with a comma, and a ""quote""."'));
 });

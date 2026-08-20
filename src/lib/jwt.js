@@ -1,14 +1,3 @@
-/**
- * Minimal HS256 JSON Web Tokens, built on `node:crypto`.
- *
- * Only HS256 is implemented and only HS256 is accepted: the `alg` header is compared
- * against a constant before any signature work, which closes the `alg: none` and
- * algorithm-confusion families outright.
- *
- * Used exclusively for admin access and refresh tokens. Readers never receive a JWT —
- * their bearer token is opaque and database-backed (see `lib/tokens.js`).
- */
-
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { ulid } from './ids.js';
 
@@ -17,16 +6,10 @@ const HEADER = Object.freeze({ alg: ALGORITHM, typ: 'JWT' });
 const ENCODED_HEADER = Buffer.from(JSON.stringify(HEADER), 'utf8').toString('base64url');
 const DEFAULT_CLOCK_TOLERANCE_SEC = 30;
 
-/** Access tokens are short-lived (§9.4: 15 minutes). */
 export const ACCESS_TOKEN_TTL_SEC = 15 * 60;
-/** Refresh tokens rotate and are bound to a server-side record. */
 export const REFRESH_TOKEN_TTL_SEC = 12 * 60 * 60;
 
 export class JwtError extends Error {
-  /**
-   * @param {string} code Machine-readable reason.
-   * @param {string} message Human-readable reason.
-   */
   constructor(code, message) {
     super(message);
     this.name = 'JwtError';
@@ -50,14 +33,6 @@ function signSegments(signingInput, secret) {
   return createHmac('sha256', secret).update(signingInput, 'utf8').digest();
 }
 
-/**
- * Sign a JWT.
- *
- * @param {object} claims Claims to embed. `iat`, `exp` and `jti` are added automatically.
- * @param {{ secret: string, expiresInSec?: number, issuer?: string, audience?: string,
- *           subject?: string, now?: number, jti?: string }} options Signing options.
- * @returns {{ token: string, jti: string, expiresAt: Date }} The token and its metadata.
- */
 export function signJwt(claims, options) {
   const { secret, expiresInSec = ACCESS_TOKEN_TTL_SEC, issuer, audience, subject, now = Date.now() } =
     options ?? {};
@@ -89,15 +64,6 @@ export function signJwt(claims, options) {
   };
 }
 
-/**
- * Verify a JWT and return its claims.
- *
- * @param {string} token The compact token.
- * @param {{ secret: string, issuer?: string, audience?: string, now?: number,
- *           clockToleranceSec?: number }} options Verification options.
- * @returns {object} The verified claims.
- * @throws {JwtError} On any structural, signature, or temporal failure.
- */
 export function verifyJwt(token, options) {
   const {
     secret,
@@ -160,13 +126,6 @@ export function verifyJwt(token, options) {
   return payload;
 }
 
-/**
- * Read a token's claims without verifying it. For logging and diagnostics only — never
- * for an authorization decision.
- *
- * @param {string} token The compact token.
- * @returns {object|null} The claims, or null when undecodable.
- */
 export function decodeJwt(token) {
   if (typeof token !== 'string') return null;
   const parts = token.split('.');

@@ -1,30 +1,3 @@
-/**
- * NMI webhook ingestion.
- *
- * Settlement truth arrives here; capture truth arrives in the synchronous sale response
- * (§6.5.3). The reader is never made to wait on a webhook, and a webhook never changes what
- * the reader was already told about their own payment.
- *
- * Five rules govern every delivery:
- *
- * 1. **The signature is verified over the raw bytes.** Re-serialising parsed JSON changes
- *    them and the HMAC would never verify, which is why `app.js` preserves
- *    `request.rawBody` for exactly this endpoint. A failure is rejected *and* alarmed — a
- *    spike is the signature of someone probing the endpoint (§9.10).
- * 2. **Delivery is at-least-once, so processing is idempotent.** Each event is stored under
- *    its gateway event id; a repeat is skipped, not reprocessed. The unique index is the
- *    arbiter, so two concurrent deliveries cannot both win.
- * 3. **The stored payload is redacted first.** The gateway defines the shape; this module
- *    strips every card field and every network identifier before the document is written.
- *    No PAN, expiry, CVV, address or IP reaches `nmi_webhook_events`.
- * 4. **Reported amounts are never trusted.** The transaction is re-queried through the
- *    Payment API before any amount is believed. When the re-query is inconclusive, the
- *    amount already recorded on our own record is used — never the number in the webhook.
- * 5. **State moves forward only.** A late or reordered delivery cannot walk a record
- *    backwards, and a chargeback flags the record for a human. Transcript access is never
- *    revoked automatically: "never auto-punish the reader record" (§6.8).
- */
-
 import { SCHEMA_VERSION } from '../../config/constants.js';
 import { COLLECTIONS, creationStamps, updateStamps } from '../../db/collections.js';
 import { AUDIT_ACTIONS, writeAuditSafe } from '../../lib/audit.js';
@@ -35,7 +8,6 @@ import { ApiError } from '../../plugins/errors.js';
 import { recordPaymentTransaction } from './donations.js';
 import { ORDER_STATE_RANK } from './orders.js';
 
-/** Forward-only lifecycle ranking for contributions. */
 export const DONATION_STATE_RANK = Object.freeze({
   initiated: 0,
   pending: 1,
@@ -47,21 +19,12 @@ export const DONATION_STATE_RANK = Object.freeze({
   refunded: 4,
 });
 
-/**
- * Audit actions this module writes that `lib/audit.js` does not already name. They are
- * declared once, here, so the same occurrence is never logged under two names.
- */
 export const WEBHOOK_AUDIT_ACTIONS = Object.freeze({
   DONATION_CHARGEBACK: 'donation.chargeback',
   ORDER_CHARGEBACK: 'order.chargeback',
   WEBHOOK_UNMATCHED: 'webhook.unmatched',
 });
 
-/**
- * Keys that never enter storage, normalised so `cc_number`, `ccNumber` and `CCNUMBER` are
- * all the same key. Card data and network identifiers are dropped outright rather than
- * masked: a masked field is still a field somebody will one day try to read.
- */
 const FORBIDDEN_PAYLOAD_KEYS = new Set([
   'ccnumber',
   'ccexp',
@@ -92,13 +55,6 @@ const MAX_PAYLOAD_DEPTH = 6;
 const MAX_PAYLOAD_ARRAY = 50;
 const MAX_PAYLOAD_STRING = 512;
 
-/**
- * Deeply copy a gateway payload, dropping everything that may not be retained.
- *
- * @param {unknown} value Any value from the gateway.
- * @param {number} [depth] Internal recursion depth.
- * @returns {unknown} A storable copy.
- */
 export function redactGatewayPayload(value, depth = 0) {
   if (value === null || value === undefined) return null;
   if (typeof value === 'string') {
@@ -120,13 +76,6 @@ export function redactGatewayPayload(value, depth = 0) {
   return out;
 }
 
-/**
- * Read the first present value from a list of candidate paths.
- *
- * @param {object} source The parsed body.
- * @param {string[][]} paths Candidate paths.
- * @returns {string|null} The value as a string, or null.
- */
 function pick(source, paths) {
   for (const path of paths) {
     let cursor = source;
@@ -146,12 +95,6 @@ function pick(source, paths) {
   return null;
 }
 
-/**
- * Classify a gateway event type into the five outcomes this platform reconciles.
- *
- * @param {string|null} eventType The raw event type.
- * @returns {'sale'|'refund'|'void'|'settlement'|'chargeback'|'unknown'} The class.
- */
 export function classifyEvent(eventType) {
   const value = String(eventType ?? '').toLowerCase();
   if (value === '') return 'unknown';
@@ -165,24 +108,12 @@ export function classifyEvent(eventType) {
   return 'unknown';
 }
 
-/**
- * @param {{ db: import('mongodb').Db, config: object, logger?: object, nmi?: object }} deps
- *        Dependencies.
- * @returns {object} The webhooks service.
- */
 export function createWebhooksService({ db, config, logger = null, nmi = null }) {
   const events = db.collection(COLLECTIONS.NMI_WEBHOOK_EVENTS);
   const donations = db.collection(COLLECTIONS.DONATIONS);
   const orders = db.collection(COLLECTIONS.ORDERS);
   const gateway = nmi ?? nmiClient(logger);
 
-  /**
-   * Ask the gateway what a transaction really is. The webhook's own numbers are evidence
-   * that something happened, never evidence of how much.
-   *
-   * @param {string} transactionId The gateway transaction id.
-   * @returns {Promise<object|null>} The normalised response, or null when unanswered.
-   */
   async function reQuery(transactionId) {
     try {
       const result = await gateway.query({ transactionId });
@@ -196,14 +127,6 @@ export function createWebhooksService({ db, config, logger = null, nmi = null })
     }
   }
 
-  /**
-   * Locate the record a transaction belongs to. Two separate lookups against two separate
-   * collections — the workflows are not merged even to answer this question.
-   *
-   * @param {string} transactionId The gateway transaction id.
-   * @returns {Promise<{ workflow: 'donation'|'purchase', collection: object,
-   *                     collectionName: string, record: object }|null>} The parent.
-   */
   async function locate(transactionId) {
     const donation = await donations.findOne({ 'nmi.transactionId': transactionId });
     if (donation) {
@@ -226,14 +149,6 @@ export function createWebhooksService({ db, config, logger = null, nmi = null })
     return null;
   }
 
-  /**
-   * Apply a status only when it moves the record forward.
-   *
-   * @param {object} parent The located parent.
-   * @param {string} status The candidate status.
-   * @param {object} [extraSet] Additional fields to set alongside it.
-   * @returns {Promise<boolean>} True when the transition was applied.
-   */
   async function advance(parent, status, extraSet = {}) {
     const ranks = parent.workflow === 'donation' ? DONATION_STATE_RANK : ORDER_STATE_RANK;
     const current = ranks[parent.record.status] ?? 0;
@@ -248,15 +163,6 @@ export function createWebhooksService({ db, config, logger = null, nmi = null })
     return true;
   }
 
-  /**
-   * Reconcile a refund reported by the gateway. The authoritative amount comes from the
-   * re-query; failing that, from what we already recorded.
-   *
-   * @param {object} parent The located parent.
-   * @param {object|null} queried The re-query result.
-   * @param {string} transactionId The gateway transaction id.
-   * @returns {Promise<void>} Resolves when reconciled.
-   */
   async function reconcileRefund(parent, queried, transactionId) {
     const recorded = Number.isInteger(parent.record.amountCents) ? parent.record.amountCents : 0;
     const queriedCents = Number.isInteger(Number(queried?.raw?.amount))
@@ -304,14 +210,6 @@ export function createWebhooksService({ db, config, logger = null, nmi = null })
   }
 
   return {
-    /**
-     * `POST /webhooks/nmi`.
-     *
-     * @param {{ rawBody: Buffer|string|null, signatureHeader: string|undefined,
-     *           body: object|undefined, correlationId?: string|null }} input The delivery.
-     * @returns {Promise<{ received: true, status: 'processed'|'skipped'|'ignored' }>} Outcome.
-     * @throws {ApiError} 401 when the signature does not verify.
-     */
     async handle(input) {
       const { rawBody, signatureHeader, body, correlationId = null } = input;
 
@@ -323,8 +221,6 @@ export function createWebhooksService({ db, config, logger = null, nmi = null })
       });
 
       if (!verification.valid) {
-        // Alarmed, not merely logged. The reason stays server-side; the caller is told
-        // nothing that would help them craft a better forgery.
         logger?.warn?.(
           { alert: 'webhook_signature_rejected', reason: verification.reason },
           'an NMI webhook was rejected before it was read',
@@ -376,7 +272,6 @@ export function createWebhooksService({ db, config, logger = null, nmi = null })
         await events.insertOne(record);
       } catch (error) {
         if (error?.code === 11000 || error?.code === 11001) {
-          // At-least-once delivery. This id has been seen; nothing is reprocessed.
           return { received: true, status: 'skipped' };
         }
         throw error;
@@ -441,9 +336,6 @@ export function createWebhooksService({ db, config, logger = null, nmi = null })
             const queried = await reQuery(transactionId);
 
             if (classification === 'chargeback') {
-              // Flagged for a human. Nothing is revoked, nothing is cancelled, no access is
-              // withdrawn: a dispute is a conversation with the card network, not a verdict
-              // about the reader (§6.8).
               await writeAuditSafe(
                 db,
                 {
@@ -480,9 +372,6 @@ export function createWebhooksService({ db, config, logger = null, nmi = null })
               });
               outcome = 'processed';
             } else if (classification === 'sale' || classification === 'settlement') {
-              // Settlement confirms what the synchronous response already told the reader.
-              // The only forward movement it can produce is `initiated → captured` for a
-              // record whose response was lost in flight.
               if (queried?.ok) {
                 await advance(
                   parent,
@@ -520,8 +409,6 @@ export function createWebhooksService({ db, config, logger = null, nmi = null })
             },
           },
         );
-        // The gateway retries on a non-2xx, which is exactly what should happen: the event
-        // is stored, the id is known, and the retry will be skipped if it later succeeds.
         throw new ApiError(503, 'WEBHOOK_NOT_PROCESSED', 'That event could not be processed.');
       }
 

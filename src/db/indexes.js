@@ -1,29 +1,12 @@
-/**
- * Index definitions for every collection.
- *
- * Rule (§9.8): every hot-path query is index-covered. Uniqueness constraints here are the
- * last line of defence for the invariants the services enforce — one canonical public
- * edition, one session per token hash, one gateway transaction per payment record, one
- * redemption per invitation code.
- *
- * Optional-field uniqueness uses `partialFilterExpression` rather than `sparse`, so a
- * document that simply omits the field never collides with another that also omits it.
- */
-
 import { COLLECTIONS } from './collections.js';
 
 const existsString = (field) => ({ [field]: { $type: 'string' } });
 
-/**
- * Declarative index specification, keyed by collection name.
- * Each entry is `{ name, key, options? }` and is applied idempotently.
- */
 export const INDEX_SPECS = Object.freeze({
   [COLLECTIONS.MANUSCRIPTS]: Object.freeze([
     { name: 'manuscripts_branch_status', key: { branch: 1, status: 1 } },
     { name: 'manuscripts_edition', key: { edition: 1 } },
     {
-      // Exactly one canonical edition per branch.
       name: 'manuscripts_canonical_unique',
       key: { branch: 1 },
       options: { unique: true, partialFilterExpression: { isCanonical: true } },
@@ -57,7 +40,6 @@ export const INDEX_SPECS = Object.freeze({
     { name: 'reading_sessions_token_unique', key: { tokenHash: 1 }, options: { unique: true } },
     { name: 'reading_sessions_cohort', key: { cohortId: 1 } },
     {
-      // TTL: the document disappears at `expiresAt` (§9.5 retention).
       name: 'reading_sessions_ttl',
       key: { expiresAt: 1 },
       options: { expireAfterSeconds: 0 },
@@ -88,7 +70,6 @@ export const INDEX_SPECS = Object.freeze({
   [COLLECTIONS.INVITATIONS]: Object.freeze([
     { name: 'invitations_code_unique', key: { code: 1 }, options: { unique: true } },
     { name: 'invitations_cohort_status', key: { cohortId: 1, status: 1 } },
-    // The dashboard's default ordering for the invitation status list (§10.7.2).
     { name: 'invitations_created', key: { createdAt: -1 } },
     {
       name: 'invitations_email',
@@ -109,8 +90,6 @@ export const INDEX_SPECS = Object.freeze({
   [COLLECTIONS.QUESTIONNAIRE_RESPONSES]: Object.freeze([
     { name: 'questionnaire_responses_questionnaire', key: { questionnaireId: 1, completedAt: -1 } },
     { name: 'questionnaire_responses_cohort', key: { cohortId: 1, completedAt: -1 } },
-    // The review screen's default view is every response, newest first, with no filter at
-    // all. The compound indexes above cannot serve that sort.
     { name: 'questionnaire_responses_completed', key: { completedAt: -1 } },
     { name: 'questionnaire_responses_format', key: { readingFormat: 1, completedAt: -1 } },
     {
@@ -120,20 +99,12 @@ export const INDEX_SPECS = Object.freeze({
     },
   ]),
 
-  /**
-   * The review queue is read four ways — by triage state, by category, by cohort, and by
-   * the passage a reader marked — so each has its own compound index ending in `createdAt`,
-   * which is also the sort. `passages.unitId` is multikey: one submission may mark several
-   * passages and must be findable under each of them.
-   */
   [COLLECTIONS.FEEDBACK]: Object.freeze([
     { name: 'feedback_status_created', key: { status: 1, createdAt: -1 } },
     { name: 'feedback_category_created', key: { category: 1, createdAt: -1 } },
     { name: 'feedback_cohort_created', key: { cohortId: 1, createdAt: -1 } },
     { name: 'feedback_passage_unit', key: { 'passages.unitId': 1, createdAt: -1 } },
     {
-      // `GET /feedback/mine`. Partial, because severance nulls the reference and a null
-      // session is not something anything ever looks up.
       name: 'feedback_session_created',
       key: { sessionId: 1, createdAt: -1 },
       options: { partialFilterExpression: existsString('sessionId') },
@@ -232,10 +203,6 @@ export const INDEX_SPECS = Object.freeze({
     { name: 'content_versions_published', key: { publishedAt: -1 } },
   ]),
 
-  /**
-   * `_id` is the template key, so lookup by key is already covered. The only other query is
-   * the dashboard listing, ordered by when each template was last touched.
-   */
   [COLLECTIONS.EMAIL_TEMPLATES]: Object.freeze([
     { name: 'email_templates_updated', key: { updatedAt: -1 } },
   ]),
@@ -248,21 +215,11 @@ export const INDEX_SPECS = Object.freeze({
   ]),
 });
 
-/** Total number of declared indexes. Useful as a smoke assertion in tests. */
 export const INDEX_COUNT = Object.values(INDEX_SPECS).reduce(
   (total, specs) => total + specs.length,
   0,
 );
 
-/**
- * Create every declared index. Idempotent: MongoDB ignores an identical existing index and
- * `IndexOptionsConflict` / `IndexKeySpecsConflict` are surfaced rather than swallowed, so a
- * drifted definition is visible instead of silently ignored.
- *
- * @param {import('mongodb').Db} db An open database handle.
- * @param {{ logger?: { info: Function, warn: Function } }} [options] Optional logger.
- * @returns {Promise<{ created: number, collections: number, conflicts: string[] }>} Summary.
- */
 export async function ensureIndexes(db, options = {}) {
   const { logger } = options;
   let created = 0;
@@ -280,7 +237,6 @@ export async function ensureIndexes(db, options = {}) {
       await db.collection(collectionName).createIndexes(models);
       created += models.length;
     } catch {
-      // Apply one at a time so a single drifted index does not hide the rest.
       for (const model of models) {
         try {
           await db.collection(collectionName).createIndexes([model]);
@@ -307,13 +263,6 @@ export async function ensureIndexes(db, options = {}) {
   return { created, collections: collectionNames.length, conflicts };
 }
 
-/**
- * Report indexes present in the database that this file does not declare. Drift detection
- * for the deployment checklist; never destructive.
- *
- * @param {import('mongodb').Db} db An open database handle.
- * @returns {Promise<Array<{ collection: string, index: string }>>} Undeclared indexes.
- */
 export async function findUndeclaredIndexes(db) {
   const undeclared = [];
   for (const [collectionName, specs] of Object.entries(INDEX_SPECS)) {

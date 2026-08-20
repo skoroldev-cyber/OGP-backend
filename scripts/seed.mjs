@@ -1,30 +1,4 @@
 #!/usr/bin/env node
-/**
- * Seed a database with everything the Reading Room needs to open.
- *
- * Idempotent by construction: every write is an upsert keyed on the document's natural
- * identifier, so running this twice changes nothing the second time. That matters more than it
- * usually does, because two of these collections are governed rather than merely stored.
- *
- * What is deliberately NOT done here:
- *
- *   - Resonance nodes are seeded with `qa_status.validated: false`. §3.6.3 makes human review a
- *     gate ("human review validates every no-share zone and decompression window"), and a seed
- *     script is not a human. Seeding them pre-validated would let the sharing gate open on
- *     windows nobody has read.
- *   - Sharing prompts are seeded `active: false` with `requires_human_review: true`. A prompt
- *     that appears to a reader without an editor having approved its wording is exactly the
- *     failure §5.3 exists to prevent.
- *   - The hardcover product is seeded with `priceCents: null` and `purchasable: false`. No price
- *     exists anywhere in the corpus (§6.10), and the purchase flow must not be activatable until
- *     the founder sets one.
- *
- * Usage:
- *   node scripts/seed.mjs [--only=<collection>] [--drop] [--dry-run]
- *
- * @module scripts/seed
- */
-
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -65,10 +39,6 @@ const drop = Boolean(flags.drop);
 
 if (drop) refuseInProduction(config, 'drop seeded collections');
 
-/* -------------------------------------------------------------------------- */
-/* The certified release                                                       */
-/* -------------------------------------------------------------------------- */
-
 const releasePath = path.join(CONTENT_DIR, 'release.json');
 if (!fs.existsSync(releasePath)) {
   fail(
@@ -77,24 +47,13 @@ if (!fs.existsSync(releasePath)) {
   );
 }
 
-/** @type {{ releaseId: string, workId: string, edition: string, branch: string, manuscriptVersion: string, contentHash: string, totalWordCount: number, units: object[] }} */
 const release = JSON.parse(fs.readFileSync(releasePath, 'utf8'));
 
-/**
- * Load one unit's full document, including its blocks.
- *
- * @param {object} entry A release manifest entry.
- * @returns {object} The unit document.
- */
 function loadUnit(entry) {
   const file = path.join(CONTENT_DIR, 'units', `${entry.unitId}.json`);
   if (!fs.existsSync(file)) fail(`Release manifest names ${entry.unitId} but ${file} is missing.`, 5);
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
-
-/* -------------------------------------------------------------------------- */
-/* Governance records                                                          */
-/* -------------------------------------------------------------------------- */
 
 const MANUSCRIPT = {
   _id: 'manuscript_now_or_never_one',
@@ -102,12 +61,9 @@ const MANUSCRIPT = {
   subtitle: 'The Global Family Unites to Save the World',
   workId: release.workId,
   edition: release.edition,
-  // The public API hard-filters on this. Only a public branch is ever servable, and the
-  // Confidential Development Edition must never acquire one (§9.2.1).
   branch: 'public',
   version: release.manuscriptVersion,
   isCanonical: true,
-  // Always true, in every release, forever: "The Opening Arc always remains untouched."
   openingArcLocked: true,
   chapterCount: 25,
   status: 'published',
@@ -116,16 +72,6 @@ const MANUSCRIPT = {
   schemaVersion: 1,
 };
 
-/**
- * The initial resonance map (§3.6.3, [PROPOSED] tagging, pending the human-review gate).
- *
- * Each node points at a unit and says what kind of moment it is. Nothing here is validated —
- * `qa_status.validated` is false on every one, which means the sharing gate treats none of
- * them as an open window yet. That is the correct starting state: the map is an editorial
- * artefact, and it becomes operative when a person says it does.
- *
- * @returns {object[]} Node documents.
- */
 function resonanceNodes() {
   const nodes = [];
   let ordinal = 0;
@@ -138,10 +84,6 @@ function resonanceNodes() {
       manuscript_unit_id: unitId,
       node_type: nodeType,
       summary,
-      // §3.6.3 [OPEN QUESTION]: every score field in the handoff is a bare integer with no
-      // scale and no threshold, and the "K1.3+ threshold model" is named but never defined.
-      // Until the founder supplies definitions, the gates operate on flags and node presence
-      // alone — so the scores are left empty rather than invented.
       scores: {},
       qa_status: { validated: false, validatedBy: null, validatedAt: null },
       schemaVersion: 1,
@@ -151,12 +93,10 @@ function resonanceNodes() {
   const units = new Map(release.units.map((unit) => [unit.unitId, unit]));
   const has = (unitId) => units.has(unitId);
 
-  // Recognition peaks.
   if (has('CU-NONO-OA-003-S07')) add('CU-NONO-OA-003-S07', 'recognition_peak', 'Chapter 0 §7 — The Global Family Outside the Room');
   if (has('CU-NONO-OA-008-S01')) add('CU-NONO-OA-008-S01', 'recognition_peak', 'Chapter 1 §1 — You Were Right About the World');
   if (has('CU-NONO-OA-008-S08')) add('CU-NONO-OA-008-S08', 'recognition_peak', 'Chapter 1 §8 — The Threshold');
 
-  // No-share zones: the witness sections, and the machinery chapter's core.
   for (const unitId of [
     'CU-NONO-OA-004-S02',
     'CU-NONO-OA-004-S03',
@@ -171,30 +111,21 @@ function resonanceNodes() {
     if (has(unitId)) add(unitId, 'no_share_zone', 'Witness material — sharing suppressed');
   }
 
-  // Decompression windows follow the heaviest passages.
   if (has('CU-NONO-OA-004-S09')) add('CU-NONO-OA-004-S09', 'decompression_window', 'After Chapter 00’s invitation');
   if (has('CU-NONO-OA-007')) add('CU-NONO-OA-007', 'decompression_window', 'After The Forgetting');
   if (has('CU-NONO-OA-008-S08')) add('CU-NONO-OA-008-S08', 'decompression_window', 'After Chapter 1 §8');
   if (has('CU-NONO-OA-010')) add('CU-NONO-OA-010', 'decompression_window', 'After the Introduction');
 
-  // Return windows at every component boundary.
   for (const unit of release.units.filter((entry) => !entry.parentUnitId && entry.componentIndex > 0)) {
     add(unit.unitId, 'return_window', `Boundary before ${unit.canonicalTitle}`);
   }
 
-  // Convergence thresholds — the only places "Become Family." may ever render.
   if (has('CU-NONO-OA-008-S08')) add('CU-NONO-OA-008-S08', 'convergence_threshold', 'Chapter 1 §8 — The Threshold');
   if (has('CU-NONO-OA-011')) add('CU-NONO-OA-011', 'convergence_threshold', 'Transition to Chapter 2 — Awareness');
 
   return nodes;
 }
 
-/**
- * Sharing prompts. Every string here passes the prohibited-terms lint before it is written,
- * and every one is seeded inactive.
- *
- * @returns {object[]} Prompt documents.
- */
 function sharingPrompts() {
   const prompts = [
     {
@@ -228,14 +159,11 @@ function sharingPrompts() {
   ];
 
   return prompts.map((prompt) => {
-    // A prompt is the one piece of copy an editor writes directly into the database. Lint it
-    // here so a banned word can never be seeded, only rejected.
     assertCleanCopy(prompt.prompt_text, `sharing_prompts.${prompt.prompt_id}.prompt_text`);
 
     return {
       _id: prompt.prompt_id,
       ...prompt,
-      // The enum has exactly one value. Sharing is rare by definition, not by tuning.
       frequency: 'rare',
       cooldown_units: 8,
       requires_human_review: true,
@@ -245,13 +173,6 @@ function sharingPrompts() {
   });
 }
 
-/**
- * The Questionnaire v2.0 instrument, loaded from `scripts/lib/questionnaire-v2.mjs`.
- *
- * Questions are data, never code (§9.2.8), so the instrument lives in a file of its own
- * rather than inline here: editing a question is then a change to one reviewable document
- * instead of a change to the seeder.
- */
 const QUESTIONNAIRE = QUESTIONNAIRE_V2;
 
 const COHORT = {
@@ -274,8 +195,6 @@ const PRODUCT = {
   type: 'hardcover',
   name: '"Now or Never – One" — Hardcover Edition',
   edition: 'hardcover_standard',
-  // No price exists anywhere in the corpus. The field ships null and the purchase flow cannot
-  // activate until the founder sets one (§6.7, §6.10).
   priceCents: null,
   currency: 'USD',
   reservable: true,
@@ -285,10 +204,6 @@ const PRODUCT = {
   status: 'reservable',
   schemaVersion: 1,
 };
-
-/* -------------------------------------------------------------------------- */
-/* Run                                                                         */
-/* -------------------------------------------------------------------------- */
 
 const PLAN = [
   { name: COLLECTIONS.MANUSCRIPTS, documents: () => [MANUSCRIPT] },

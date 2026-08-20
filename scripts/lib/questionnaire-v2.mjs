@@ -1,27 +1,6 @@
-/**
- * One Global People — Opening Arc Beta Test Questionnaire, Beta Test Instrument v2.0.
- *
- * **This file is data, not code.** Nothing in the platform authors a question, reorders one,
- * or rewords one: the instrument is seeded into `questionnaires` and rendered verbatim from
- * there, so a change to the wording is an editorial act against the record rather than a
- * deployment (§9.2.8). It lives under `scripts/` for exactly that reason — it is loaded into
- * the database, never imported by the running server.
- *
- * The prompts below are the instrument's own sentences, transcribed unchanged. Where the
- * instrument gives a question a short name ("3. Emotional movement: Did the sequence move
- * you…"), the name is carried in `label` and the sentence in `prompt`, so a reviewer reading
- * two hundred responses can scan by heading without the headings replacing the questions.
- *
- * `questionId` is stable and must stay stable. It is the join between a stored answer and
- * the question a reader was shown; renumbering it would silently re-point historic answers
- * at different questions. New questions take new identifiers, they never reuse a retired one.
- */
-
-/** The instrument's fixed scale, stated once and shown wherever a rating is asked. */
 const SCALE_LEGEND =
   '1 = not at all, 2 = weak, 3 = moderate, 4 = strong, 5 = very strong.';
 
-/** Q12's word set — the instrument's own list, in its own order. */
 const READER_STATE_WORDS = Object.freeze([
   'despair',
   'clarity',
@@ -32,18 +11,8 @@ const READER_STATE_WORDS = Object.freeze([
   'confusion',
 ]);
 
-/** The instrument's reviewer metadata: how the manuscript was read, and by whom. */
 const READING_FORMATS = Object.freeze(['DOCX', 'PDF', 'print', 'immersive room']);
 
-/**
- * The core questions and the reviewer metadata, in instrument order.
- *
- * Nothing is marked `required`. The instrument asks reviewers to answer "as honestly and
- * specifically as possible" and marks no question mandatory, so neither does this: a form
- * that refuses to accept thirteen careful answers because the fourteenth is blank collects
- * fewer answers, not better ones. The server's only floor is that a submission must carry
- * at least one answer, which is enforced in the service rather than per question.
- */
 const QUESTIONS = [
   {
     questionId: 'q01_opening_capture',
@@ -144,8 +113,6 @@ const QUESTIONS = [
       'Do you believe this Opening Arc is ready to be shown to a wider beta audience? Rate 1–5 and explain why.',
   },
 
-  /* ---- Reviewer metadata ---- */
-
   {
     questionId: 'm01_reviewer',
     section: 'reviewer',
@@ -190,13 +157,6 @@ const QUESTIONS = [
   },
 ];
 
-/**
- * The seeded document.
- *
- * `_id` is fixed rather than generated so re-running the seed updates the instrument in
- * place instead of creating a second live copy — and so the responses already returned
- * against it keep pointing at it.
- */
 export const QUESTIONNAIRE_V2 = {
   _id: 'q_v2_0',
   title: 'Opening Arc Beta Test Questionnaire',

@@ -1,24 +1,6 @@
-/**
- * NMI Payment API client.
- *
- * Card data never reaches this service. The browser tokenises through Collect.js hosted
- * fields and hands us a single-use `payment_token`; everything below posts that token,
- * an amount and an order reference to `https://secure.nmi.com/api/transact.php` as
- * `application/x-www-form-urlencoded` (§6.5.3). That keeps the platform SAQ-A eligible.
- *
- * Two rules are absolute:
- *  1. The security key is never logged, never returned, never placed in an error message.
- *  2. No PAN, expiry or CVV may be passed through this client at all — if a caller
- *     supplies one, the request is refused rather than forwarded.
- *
- * NMI's `response` field is `1` approved, `2` declined, `3` error. Callers should branch on
- * the normalised `status`, not on the raw code.
- */
-
 import { randomBytes } from 'node:crypto';
 import config from '../config/index.js';
 
-/** Fields that must never leave this process in a log line. */
 const NEVER_LOG = new Set([
   'security_key',
   'payment_token',
@@ -30,7 +12,6 @@ const NEVER_LOG = new Set([
   'customer_vault_id',
 ]);
 
-/** Fields that must never be accepted from a caller — raw card data. */
 const REFUSED_FIELDS = ['ccnumber', 'ccexp', 'cvv', 'card_number', 'cardNumber'];
 
 const RESPONSE_STATUS = Object.freeze({
@@ -40,10 +21,6 @@ const RESPONSE_STATUS = Object.freeze({
 });
 
 export class NmiError extends Error {
-  /**
-   * @param {string} code Machine-readable reason.
-   * @param {string} message Human-readable reason. Never contains a secret.
-   */
   constructor(code, message) {
     super(message);
     this.name = 'NmiError';
@@ -69,12 +46,6 @@ function amountFromCents(amountCents) {
   return (amountCents / 100).toFixed(2);
 }
 
-/**
- * Strip everything sensitive from a parameter bag before it can reach a log.
- *
- * @param {Record<string, string>} params Request parameters.
- * @returns {Record<string, string>} A safe copy.
- */
 export function redactParams(params) {
   const safe = {};
   for (const [key, value] of Object.entries(params)) {
@@ -83,15 +54,6 @@ export function redactParams(params) {
   return safe;
 }
 
-/**
- * Normalise an NMI urlencoded response body.
- *
- * @param {string} body The raw response body.
- * @returns {{ status: 'approved'|'declined'|'error', ok: boolean, responseCode: string,
- *             responseText: string, transactionId: string|null, authCode: string|null,
- *             avsResponse: string|null, cvvResponse: string|null, orderId: string|null,
- *             responseCodeDetail: string|null, raw: Record<string, string> }} Result.
- */
 export function parseNmiResponse(body) {
   const parsed = new URLSearchParams(typeof body === 'string' ? body : '');
   const raw = Object.fromEntries(parsed.entries());
@@ -116,8 +78,6 @@ export function parseNmiResponse(body) {
 function mockResponse(params) {
   const amount = Number(params.amount ?? '0');
   const cents = Math.round(amount * 100);
-  // Mirrors NMI's amount-triggered simulation so the staging test matrix has deterministic
-  // declines and errors without a live gateway: x.05 declines, x.06 errors.
   const remainder = cents % 100;
   if (remainder === 5) {
     return parseNmiResponse(
@@ -144,15 +104,6 @@ function mockResponse(params) {
   return parseNmiResponse(search.toString());
 }
 
-/**
- * Build a client bound to a gateway configuration.
- *
- * @param {{ apiUrl?: string, securityKey?: string, mock?: boolean, timeoutMs?: number,
- *           logger?: object, fetchImpl?: typeof fetch }} [options] Overrides; defaults come
- *        from `config.nmi`.
- * @returns {{ sale: Function, refund: Function, voidTransaction: Function, query: Function,
- *             validateVault: Function, request: Function, isMock: boolean }} The client.
- */
 export function createNmiClient(options = {}) {
   const apiUrl = options.apiUrl ?? config.nmi.apiUrl;
   const securityKey = options.securityKey ?? config.nmi.securityKey;
@@ -165,12 +116,6 @@ export function createNmiClient(options = {}) {
     throw new NmiError('NMI_NO_FETCH', 'A global fetch implementation is required.');
   }
 
-  /**
-   * Post a parameter bag to the gateway.
-   *
-   * @param {Record<string, string|number|undefined|null>} params Request parameters.
-   * @returns {Promise<object>} The normalised response.
-   */
   async function request(params) {
     assertNoCardData(params);
     const body = new URLSearchParams();
@@ -245,14 +190,6 @@ export function createNmiClient(options = {}) {
 
     request,
 
-    /**
-     * Charge a Collect.js payment token.
-     *
-     * @param {{ paymentToken: string, amountCents: number, orderId: string, email?: string,
-     *           idempotencyKey?: string, currency?: string, orderDescription?: string,
-     *           billingAddress?: object }} input Sale details.
-     * @returns {Promise<object>} The normalised response.
-     */
     async sale(input) {
       const {
         paymentToken,
@@ -275,8 +212,6 @@ export function createNmiClient(options = {}) {
         orderid: orderId,
         order_description: orderDescription,
         email,
-        // NMI duplicate detection keys off this value in addition to our own idempotency
-        // record, so a retried submission cannot double-charge.
         merchant_defined_field_1: idempotencyKey,
         first_name: billingAddress?.firstName,
         last_name: billingAddress?.lastName,
@@ -288,12 +223,6 @@ export function createNmiClient(options = {}) {
       });
     },
 
-    /**
-     * Refund a settled transaction, fully or partially.
-     *
-     * @param {{ transactionId: string, amountCents?: number|null }} input Refund details.
-     * @returns {Promise<object>} The normalised response.
-     */
     async refund({ transactionId, amountCents = null } = {}) {
       if (typeof transactionId !== 'string' || transactionId === '') {
         throw new NmiError('NMI_NO_TRANSACTION', 'A transaction id is required.');
@@ -305,12 +234,6 @@ export function createNmiClient(options = {}) {
       });
     },
 
-    /**
-     * Void an authorisation that has not yet settled.
-     *
-     * @param {{ transactionId: string }} input Void details.
-     * @returns {Promise<object>} The normalised response.
-     */
     async voidTransaction({ transactionId } = {}) {
       if (typeof transactionId !== 'string' || transactionId === '') {
         throw new NmiError('NMI_NO_TRANSACTION', 'A transaction id is required.');
@@ -318,13 +241,6 @@ export function createNmiClient(options = {}) {
       return request({ type: 'void', transactionid: transactionId });
     },
 
-    /**
-     * Query a transaction. Used before accepting a retry when the original outcome is
-     * ambiguous, and to re-verify amounts reported by a webhook (§9.6).
-     *
-     * @param {{ transactionId: string }} input Query details.
-     * @returns {Promise<object>} The normalised response.
-     */
     async query({ transactionId } = {}) {
       if (typeof transactionId !== 'string' || transactionId === '') {
         throw new NmiError('NMI_NO_TRANSACTION', 'A transaction id is required.');
@@ -332,15 +248,6 @@ export function createNmiClient(options = {}) {
       return request({ type: 'query', transaction_id: transactionId });
     },
 
-    /**
-     * Validate a payment token and add it to the Customer Vault, without charging.
-     * Phase 1 uses this only for hardcover reservations, behind the purchase flag —
-     * vaulting a card with nothing to charge is unjustified retention (§6.5.3).
-     *
-     * @param {{ paymentToken: string, email?: string, orderId?: string,
-     *           billingAddress?: object }} input Vault details.
-     * @returns {Promise<object>} The normalised response.
-     */
     async validateVault({ paymentToken, email, orderId, billingAddress } = {}) {
       if (typeof paymentToken !== 'string' || paymentToken === '') {
         throw new NmiError('NMI_NO_TOKEN', 'A Collect.js payment token is required.');
@@ -365,38 +272,27 @@ export function createNmiClient(options = {}) {
 
 let defaultClient = null;
 
-/**
- * The process-wide client, built from `config.nmi` on first use.
- *
- * @param {object} [logger] Optional logger to bind on first construction.
- * @returns {ReturnType<typeof createNmiClient>} The shared client.
- */
 export function nmiClient(logger) {
   if (defaultClient === null) defaultClient = createNmiClient({ logger });
   return defaultClient;
 }
 
-/** @see createNmiClient */
 export function sale(input) {
   return nmiClient().sale(input);
 }
 
-/** @see createNmiClient */
 export function refund(input) {
   return nmiClient().refund(input);
 }
 
-/** @see createNmiClient */
 export function voidTransaction(input) {
   return nmiClient().voidTransaction(input);
 }
 
-/** @see createNmiClient */
 export function query(input) {
   return nmiClient().query(input);
 }
 
-/** @see createNmiClient */
 export function validateVault(input) {
   return nmiClient().validateVault(input);
 }

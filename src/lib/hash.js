@@ -1,30 +1,14 @@
-/**
- * Password hashing for `admin_users`.
- *
- * §9.2.10 specifies argon2id. The locked dependency set for this service is
- * fastify + mongodb + dotenv and `node:` builtins only, and argon2 is a native addon —
- * so the memory-hard KDF available to us is scrypt from `node:crypto`, tuned to
- * comparable cost (N=2^15, r=8, p=1 → ~32 MiB per verification).
- *
- * Encoding: `scrypt$N$r$p$saltBase64$hashBase64`. The parameters travel with the hash so
- * cost can be raised later without invalidating existing credentials.
- *
- * Admin authentication additionally requires TOTP (see `lib/totp.js`); a password alone
- * never grants access.
- */
-
 import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 
 const scryptAsync = promisify(scrypt);
 
 const ALGORITHM = 'scrypt';
-const COST = 32768; // N — 2^15
-const BLOCK_SIZE = 8; // r
-const PARALLELISM = 1; // p
+const COST = 32768;
+const BLOCK_SIZE = 8;
+const PARALLELISM = 1;
 const KEY_LENGTH = 32;
 const SALT_LENGTH = 16;
-/** 128 * N * r bytes are needed; give scrypt headroom above that. */
 const MAX_MEMORY = 128 * COST * BLOCK_SIZE * 2;
 
 const MIN_PASSWORD_LENGTH = 12;
@@ -39,12 +23,6 @@ function assertPassword(password) {
   }
 }
 
-/**
- * Minimum-strength gate applied when an admin credential is created or changed.
- *
- * @param {string} password Candidate password.
- * @returns {{ ok: boolean, reason?: string }} Result.
- */
 export function checkPasswordStrength(password) {
   if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) {
     return { ok: false, reason: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.` };
@@ -59,13 +37,6 @@ export function checkPasswordStrength(password) {
   return { ok: true };
 }
 
-/**
- * Hash a password.
- *
- * @param {string} password Plaintext password.
- * @param {{ cost?: number, blockSize?: number, parallelism?: number }} [options] Cost overrides.
- * @returns {Promise<string>} Encoded hash: `scrypt$N$r$p$salt$hash`.
- */
 export async function hashPassword(password, options = {}) {
   assertPassword(password);
   const cost = options.cost ?? COST;
@@ -88,13 +59,6 @@ export async function hashPassword(password, options = {}) {
   ].join('$');
 }
 
-/**
- * Parse an encoded hash without verifying it.
- *
- * @param {string} encoded Encoded hash.
- * @returns {{ algorithm: string, cost: number, blockSize: number, parallelism: number,
- *            salt: Buffer, hash: Buffer }|null} Parts, or null when malformed.
- */
 export function parseEncodedHash(encoded) {
   if (typeof encoded !== 'string') return null;
   const parts = encoded.split('$');
@@ -119,15 +83,6 @@ export function parseEncodedHash(encoded) {
   return { algorithm, cost, blockSize, parallelism, salt, hash };
 }
 
-/**
- * Verify a password against an encoded hash. Constant-time on the digest comparison;
- * returns false rather than throwing on malformed input, so a corrupt record cannot be
- * distinguished from a wrong password by the caller.
- *
- * @param {string} password Plaintext candidate.
- * @param {string} encoded Encoded hash from {@link hashPassword}.
- * @returns {Promise<boolean>} True when the password matches.
- */
 export async function verifyPassword(password, encoded) {
   if (typeof password !== 'string' || password.length > MAX_PASSWORD_LENGTH) return false;
   const parsed = parseEncodedHash(encoded);
@@ -147,13 +102,6 @@ export async function verifyPassword(password, encoded) {
   return timingSafeEqual(derived, parsed.hash);
 }
 
-/**
- * True when an existing hash was produced with weaker parameters than the current policy
- * and should be re-hashed on the next successful login.
- *
- * @param {string} encoded Encoded hash.
- * @returns {boolean} Whether a rehash is warranted.
- */
 export function needsRehash(encoded) {
   const parsed = parseEncodedHash(encoded);
   if (!parsed) return true;

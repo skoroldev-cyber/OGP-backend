@@ -1,22 +1,3 @@
-/**
- * Commerce routes.
- *
- * The route table is the first place the locked separation is visible, and it is meant to
- * be: `/commerce/donations*` and `/commerce/orders` + `/commerce/reservations` are two
- * groups served by two services over two collections with two receipt series. There is no
- * cart endpoint, no combined checkout, and no route that can accept a contribution and a
- * product in the same request.
- *
- * Auth follows BUILD_CONTRACT §4.4 exactly: the catalog, receipts and transcript access are
- * public (**P**), the two checkouts and the reservation carry the reader's anonymous
- * session (**S**), and the webhook is authenticated by signature alone (**W**).
- *
- * Rate limits: payment attempts use the `commerceAttempt` budget (10/hour/session); the
- * free-access grant uses `mailTrigger`, because it mints access and sends mail without a
- * gateway in the way; receipts and transcript links use `publicTokenLookup`, so a signed
- * token cannot be enumerated cheaply.
- */
-
 import { createDonationsService } from './donations.js';
 import { createGrantsService, createReceiptsService } from './grants.js';
 import { createOrdersService } from './orders.js';
@@ -45,11 +26,6 @@ import {
   webhookResponse,
 } from './schemas.js';
 
-/**
- * @param {import('fastify').FastifyInstance} app The encapsulated instance.
- * @param {{ config: object }} opts Registration options from `app.js`.
- * @returns {Promise<void>} Resolves when the routes are registered.
- */
 export default async function routes(app, opts) {
   const config = opts.config ?? app.config;
   const logger = app.log;
@@ -60,10 +36,6 @@ export default async function routes(app, opts) {
   const orders = createOrdersService({ db: app.db, config, logger, products });
   const receipts = createReceiptsService({ db: app.db });
   const webhooks = createWebhooksService({ db: app.db, config, logger });
-
-  /* ---------------------------------------------------------------------- */
-  /* Catalog                                                                 */
-  /* ---------------------------------------------------------------------- */
 
   app.get(
     '/commerce/products',
@@ -79,10 +51,6 @@ export default async function routes(app, opts) {
     async () => products.listActive(),
   );
 
-  /* ---------------------------------------------------------------------- */
-  /* Workflow A — contributions                                              */
-  /* ---------------------------------------------------------------------- */
-
   app.post(
     '/commerce/donations',
     {
@@ -93,8 +61,6 @@ export default async function routes(app, opts) {
         body: createDonationBody,
         response: {
           201: donationCreatedResponse,
-          // A decline is an outcome, not an error: it carries its own shape, and the copy
-          // that renders it says plainly that nothing was charged.
           402: paymentDeclinedResponse,
           ...commerceErrorResponses,
         },
@@ -133,10 +99,6 @@ export default async function routes(app, opts) {
       return result;
     },
   );
-
-  /* ---------------------------------------------------------------------- */
-  /* Workflow B — printed editions                                           */
-  /* ---------------------------------------------------------------------- */
 
   app.post(
     '/commerce/orders',
@@ -189,10 +151,6 @@ export default async function routes(app, opts) {
     },
   );
 
-  /* ---------------------------------------------------------------------- */
-  /* Accountless artefacts                                                   */
-  /* ---------------------------------------------------------------------- */
-
   app.get(
     '/commerce/receipts/:receiptNumber',
     {
@@ -228,10 +186,6 @@ export default async function routes(app, opts) {
     async (request) => grants.manifest(request.params.accessToken),
   );
 
-  /* ---------------------------------------------------------------------- */
-  /* Gateway callbacks                                                       */
-  /* ---------------------------------------------------------------------- */
-
   app.post(
     '/webhooks/nmi',
     {
@@ -246,8 +200,6 @@ export default async function routes(app, opts) {
     },
     async (request) =>
       webhooks.handle({
-        // The signature covers the exact bytes NMI sent. `app.js` preserves them for this
-        // one endpoint; re-serialising the parsed body here would break every signature.
         rawBody: request.rawBody,
         signatureHeader: request.headers['webhook-signature'],
         body: request.body,

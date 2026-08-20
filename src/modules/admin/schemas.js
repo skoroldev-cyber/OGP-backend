@@ -1,25 +1,3 @@
-/**
- * Admin route schemas.
- *
- * The dashboard is the one surface in the platform that sees named humans and money, so
- * these shapes are drawn tightly:
- *
- * 1. **No reading trail is reachable from a person.** An invitation projection carries the
- *    invitee's details and the funnel stamps, but never `redeemedBySessionId`. The join
- *    exists in the database for completion counting; exposing it would hand an
- *    administrator a per-reader browsing view, which §10.2 prohibits outright.
- * 2. **No age dimension exists in any metrics shape.** There is no `ageBand` field and no
- *    `contentLayer` breakdown in this file, so no metric can be sliced by one — the
- *    constraint is enforced by the absence of a field rather than by a filter someone can
- *    forget.
- * 3. **No aggregate is shaped for a reader.** Every response here is behind admin auth. The
- *    counts are instruments for a decision, never numbers to render back into the
- *    experience: a completion total in reader-facing UI would be a social-proof indicator.
- * 4. **Audit diffs travel as strings.** `before` and `after` hold arbitrary shapes, and an
- *    open object would be the one place `additionalProperties: false` did not hold. They
- *    are serialised to capped JSON text instead, so the envelope stays closed.
- */
-
 import {
   ADMIN_ROLES,
   ANSWER_TEXT_MAX_LENGTH,
@@ -61,37 +39,21 @@ import {
   noContentResponse,
   nullableEnumOf,
   objectSchema,
+  queryCount,
+  queryFlag,
   ulid,
 } from '../../lib/schemas.js';
 
-/* -------------------------------------------------------------------------- */
-/* Projection helpers                                                          */
-/* -------------------------------------------------------------------------- */
-
-/**
- * @param {unknown} value A Date, an ISO string, or nothing.
- * @returns {string|null} An ISO-8601 string, or null.
- */
 export function toIso(value) {
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
   if (typeof value === 'string' && value !== '') return value;
   return null;
 }
 
-/**
- * @param {unknown} value A candidate number.
- * @param {number|null} [fallback] Value when the candidate is not an integer.
- * @returns {number|null} The integer, or the fallback.
- */
 export function toInteger(value, fallback = null) {
   return Number.isInteger(value) ? value : fallback;
 }
 
-/**
- * @param {unknown} value Any value.
- * @param {number} [maxLength] Cap.
- * @returns {string|null} Compact JSON, capped, or null.
- */
 export function toJsonText(value, maxLength = 4000) {
   if (value === null || value === undefined) return null;
   let text;
@@ -103,10 +65,6 @@ export function toJsonText(value, maxLength = 4000) {
   if (typeof text !== 'string') return null;
   return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Shared fragments                                                            */
-/* -------------------------------------------------------------------------- */
 
 export const adminHeaders = adminTokenHeader;
 export const emptyResponse = noContentResponse;
@@ -123,30 +81,19 @@ export const adminErrorResponses = errorResponses(
   503,
 );
 
-const limit = Object.freeze({ type: 'integer', minimum: 1, maximum: 200, default: 50 });
-const offset = Object.freeze({ type: 'integer', minimum: 0, maximum: 100_000, default: 0 });
+const limit = queryCount(3);
+const offset = queryCount(6);
 const total = Object.freeze({ type: 'integer', minimum: 0 });
 const nullableString = (maxLength) => Object.freeze({ type: ['string', 'null'], maxLength });
 const nullableInteger = Object.freeze({ type: ['integer', 'null'] });
 const nullableDate = Object.freeze({ type: ['string', 'null'], format: 'date-time' });
 const nullableBoolean = Object.freeze({ type: ['boolean', 'null'] });
 
-/**
- * A paginated query with optional extra filters.
- *
- * @param {Record<string, object>} [extra] Additional query properties.
- * @returns {object} The query schema.
- */
 export function listQuery(extra = {}) {
   return objectSchema({ limit, offset, ...extra });
 }
 
-/** `{ id }` path parameters, used by nearly every mutation route. */
 export const idParams = objectSchema({ id: identifier }, { required: ['id'] });
-
-/* -------------------------------------------------------------------------- */
-/* Authentication                                                              */
-/* -------------------------------------------------------------------------- */
 
 export const adminSummary = objectSchema(
   {
@@ -160,25 +107,10 @@ export const adminSummary = objectSchema(
   { required: ['id', 'email', 'role', 'active'] },
 );
 
-/**
- * `POST /admin/auth/login`. Password **and** TOTP, both required, in one request — MFA is
- * mandatory for every role including the founder, so there is no intermediate state in
- * which a password alone has bought anything (§10.8.2).
- */
 export const loginBody = objectSchema(
   {
-    // The interim gate takes a name rather than an address, so the shape is a bounded string
-    // and the *service* decides what a valid identifier is. A format assertion here would
-    // reject the development sign-in before any policy had a chance to run.
     email: boundedString(320, 1),
     password: boundedString(1024, 8),
-    // Optional in SHAPE, mandatory in POLICY.
-    //
-    // MFA is not weakened by this: `auth.js` refuses any real account whose second factor is
-    // absent, unenrolled or wrong, and that check is what enforces §9.2.10. The schema only
-    // stops being the thing that rejects the request, so the service can answer every failed
-    // attempt with one message — which is the property that stops the form telling an attacker
-    // which factor was wrong.
     totpCode: { type: 'string', pattern: '^[0-9]{6}$', minLength: 6, maxLength: 6 },
   },
   { required: ['email', 'password'] },
@@ -198,10 +130,6 @@ export const sessionResponse = objectSchema(
   },
   { required: ['accessToken', 'expiresAt', 'refreshToken', 'admin'] },
 );
-
-/* -------------------------------------------------------------------------- */
-/* Content — manuscripts                                                       */
-/* -------------------------------------------------------------------------- */
 
 const manuscriptShape = objectSchema(
   {
@@ -268,10 +196,6 @@ export const manuscriptsQuery = listQuery({
   branch: enumOf(['public', 'confidential']),
 });
 
-/* -------------------------------------------------------------------------- */
-/* Content — units                                                             */
-/* -------------------------------------------------------------------------- */
-
 const emotionalMetadata = objectSchema(
   {
     emotional_intensity: nullableInteger,
@@ -316,8 +240,6 @@ const unitShape = objectSchema(
     approvedBy: nullableString(64),
     approvedAt: nullableDate,
     blockCount: nullableInteger,
-    // Present only on the single-unit read: an editor needs the text to edit it, and a list
-    // of every unit does not.
     canonicalText: nullableString(400_000),
     createdAt: nullableDate,
     updatedAt: nullableDate,
@@ -336,13 +258,9 @@ export const unitsQuery = listQuery({
   manuscriptId: identifier,
   status: enumOf(EDITORIAL_STATUSES),
   unitType: enumOf(UNIT_TYPES),
-  isOpeningArc: { type: 'boolean' },
+  isOpeningArc: queryFlag,
 });
 
-/**
- * `POST /admin/units`. `canonicalText` may be supplied on creation — a unit that has never
- * been published is not yet locked. The lock applies from publication onward, for ever.
- */
 export const createUnitBody = objectSchema(
   {
     manuscriptId: identifier,
@@ -378,11 +296,6 @@ export const createUnitBody = objectSchema(
   { required: ['manuscriptId', 'unitId', 'unitType', 'sequenceIndex'] },
 );
 
-/**
- * `PATCH /admin/units/:id`. `canonicalText` is declared here because an unpublished draft is
- * editable; the service rejects the field with `423` the moment the unit is a published
- * `opening_arc`, and records the attempt.
- */
 export const updateUnitBody = objectSchema({
   canonicalTitle: boundedString(300),
   contentRole: enumOf(CONTENT_ROLES),
@@ -439,10 +352,6 @@ export const versionsResponse = objectSchema(
   { versions: arraySchema(contentVersionShape, { maxItems: 200 }) },
   { required: ['versions'] },
 );
-
-/* -------------------------------------------------------------------------- */
-/* Resonance                                                                   */
-/* -------------------------------------------------------------------------- */
 
 const resonanceScores = objectSchema(
   {
@@ -503,7 +412,7 @@ export const resonanceNodeResponse = objectSchema(
 export const resonanceNodesQuery = listQuery({
   manuscriptUnitId: identifier,
   nodeType: enumOf(NODE_TYPES),
-  validated: { type: 'boolean' },
+  validated: queryFlag,
 });
 
 export const createResonanceNodeBody = objectSchema(
@@ -527,15 +436,10 @@ export const updateResonanceNodeBody = objectSchema({
   summary: boundedString(1000),
 });
 
-/** Validation is a human act: an administrator signs their name to it, or unsets it. */
 export const validateResonanceNodeBody = objectSchema(
   { validated: { type: 'boolean' }, note: boundedString(500) },
   { required: ['validated'] },
 );
-
-/* -------------------------------------------------------------------------- */
-/* Sharing prompts                                                             */
-/* -------------------------------------------------------------------------- */
 
 const sharingPromptShape = objectSchema(
   {
@@ -569,14 +473,10 @@ export const sharingPromptResponse = objectSchema(
 );
 
 export const sharingPromptsQuery = listQuery({
-  active: { type: 'boolean' },
+  active: queryFlag,
   promptType: enumOf(PROMPT_TYPES),
 });
 
-/**
- * `frequency` is not accepted from a client at all. The enum has exactly one value and is
- * locked at `rare`; making it writable would be a Sharing-Law violation waiting for a typo.
- */
 export const createSharingPromptBody = objectSchema(
   {
     promptId: boundedString(64, 1),
@@ -604,10 +504,6 @@ export const updateSharingPromptBody = objectSchema({
   active: { type: 'boolean' },
   notes: boundedString(1000),
 });
-
-/* -------------------------------------------------------------------------- */
-/* Beta — cohorts and invitations                                              */
-/* -------------------------------------------------------------------------- */
 
 const cohortShape = objectSchema(
   {
@@ -660,11 +556,6 @@ export const updateCohortBody = objectSchema({
   notes: boundedString(2000),
 });
 
-/**
- * The cohort funnel: interested → approved → link sent → redeemed → questionnaire
- * completed. Counts only. There is no per-participant reading trail in this shape, and the
- * dashboard has no route that would produce one.
- */
 export const cohortSummaryResponse = objectSchema(
   {
     cohortId: ulid,
@@ -696,18 +587,8 @@ export const cohortSummaryResponse = objectSchema(
   { required: ['cohortId', 'name', 'funnel'] },
 );
 
-/**
- * The whole lifecycle, not the Airtable half of it.
- *
- * §10.7.2's exact strings and §5.7's `beta_invites` delivery states are both canon, and
- * `INVITATION_STATUSES` is their union — `invited`, `opened` and `revoked` are what the
- * dashboard's own send, open and withdrawal write. Restating a shorter list here made the
- * status filter refuse three values the platform stores, and gave the resend and revoke
- * responses a declared shape their own service could not produce.
- */
 const invitationStatus = enumOf(INVITATION_STATUSES);
 
-/** No `redeemedBySessionId`. See the file header. */
 const invitationShape = objectSchema(
   {
     id: ulid,
@@ -777,11 +658,6 @@ export const sendWelcomeResponse = objectSchema(
   { required: ['invitation', 'delivered'] },
 );
 
-/**
- * The Airtable bridge (§10.7.1). One-way, deduplicated by email address, and bounded by the
- * request body limit — a large export is imported in slices rather than raising the limit
- * for every route in the service.
- */
 export const importBody = objectSchema(
   {
     cohortId: identifier,
@@ -800,41 +676,18 @@ export const importResponse = objectSchema(
   { required: ['imported', 'updated', 'skipped', 'errors'] },
 );
 
-/* -------------------------------------------------------------------------- */
-/* Beta — invitation delivery                                                  */
-/* -------------------------------------------------------------------------- */
-
-/** A cohort is 15–50 people (§5.7). The ceiling is an outer bound, not a target. */
 const MAX_BULK_ADDRESSES = 500;
 
-/**
- * `POST /admin/invitations/send`.
- *
- * The addresses are bounded strings rather than `format: 'email'` fragments, deliberately.
- * One unusable address in a pasted list of fifty must come back as its own row saying so;
- * rejecting the request would discard the other forty-nine, and partial failure is the
- * normal case here rather than an exception to it. `admin/invitations.js` tests every
- * address itself and reports `invalid_address` against the one that failed.
- */
 export const sendInvitationsBody = objectSchema(
   {
     emails: arraySchema(boundedString(254), { maxItems: MAX_BULK_ADDRESSES, minItems: 1 }),
     cohortId: identifier,
-    // Closed here rather than left to the service: rendering an unknown key throws out of
-    // the send loop, which would abandon a batch that had already written to real mailboxes.
     templateKey: enumOf(EMAIL_TEMPLATE_KEYS),
     message: boundedString(1000, 1),
   },
   { required: ['emails'] },
 );
 
-/**
- * One row per address, and the three counts the panel reads back.
- *
- * `reason` is a short closed-ish token (`already_invited`, `invalid_address`, a lowercased
- * mail code), never a relay's reply: an SMTP diagnostic can quote the address it refused,
- * and this shape is rendered in a browser and written to a log (§9.10).
- */
 export const sendInvitationsResponse = objectSchema(
   {
     results: arraySchema(
@@ -855,32 +708,16 @@ export const sendInvitationsResponse = objectSchema(
   { required: ['results', 'sent', 'skipped', 'failed'] },
 );
 
-/** `POST /admin/invitations/:id/resend` — the deliberate, single, audited repeat. */
 export const resendInvitationBody = objectSchema({
   templateKey: enumOf(EMAIL_TEMPLATE_KEYS),
 });
 
-/**
- * `POST /admin/invitations/:id/revoke`. The reason reaches the audit trail and nothing else:
- * §10.7.2 requires a leaked link to be withdrawable, not the participant to be written to
- * about it.
- */
 export const revokeInvitationBody = objectSchema({ reason: boundedString(300, 1) });
-
-/* -------------------------------------------------------------------------- */
-/* Email templates                                                             */
-/* -------------------------------------------------------------------------- */
 
 const TEMPLATE_SUBJECT_MAX = 300;
 const TEMPLATE_TEXT_MAX = 20_000;
 const TEMPLATE_HTML_MAX = 40_000;
 
-/**
- * The key is a bounded identifier rather than an enum of the closed set, so "that template
- * does not exist" has exactly one owner. `admin/templates.js` answers an unknown key with a
- * `404` naming it; a schema would answer only that validation failed, which tells a founder
- * who mistyped a key nothing at all.
- */
 export const templateKeyParams = objectSchema({ key: identifier }, { required: ['key'] });
 
 const templateShape = objectSchema(
@@ -888,13 +725,10 @@ const templateShape = objectSchema(
     key: enumOf(EMAIL_TEMPLATE_KEYS),
     subject: boundedString(TEMPLATE_SUBJECT_MAX, 1),
     bodyText: boundedString(TEMPLATE_TEXT_MAX, 1),
-    // Null is a real choice: a template stored without HTML goes out as plain text only.
     bodyHtml: nullableString(TEMPLATE_HTML_MAX),
     version: { type: 'integer', minimum: 1 },
     updatedBy: nullableString(64),
     updatedAt: nullableDate,
-    // The names the renderer knows, echoed so the editor lists them from the server rather
-    // than keeping a second copy of a vocabulary that can drift.
     placeholders: arraySchema(boundedString(64, 1), { maxItems: 10 }),
   },
   { required: ['key', 'subject', 'bodyText', 'bodyHtml', 'version', 'placeholders'] },
@@ -910,11 +744,6 @@ export const templateResponse = objectSchema(
   { required: ['template'] },
 );
 
-/**
- * `PUT /admin/templates/:key`. The key is absent from the body: a template is edited where
- * it lives, and a body that could name a different key than the path is a way to write to
- * the wrong message.
- */
 export const updateTemplateBody = objectSchema(
   {
     subject: boundedString(TEMPLATE_SUBJECT_MAX, 1),
@@ -924,21 +753,12 @@ export const updateTemplateBody = objectSchema(
   { required: ['subject', 'bodyText'] },
 );
 
-/**
- * `POST /admin/templates/:key/preview`. Every field is optional — an empty body renders what
- * is stored, and a populated one renders a draft that has not been saved yet.
- */
 export const previewTemplateBody = objectSchema({
   subject: boundedString(TEMPLATE_SUBJECT_MAX, 1),
   bodyText: boundedString(TEMPLATE_TEXT_MAX, 1),
   bodyHtml: nullableString(TEMPLATE_HTML_MAX),
 });
 
-/**
- * The rendered message. Sample values only: a preview that could be pointed at a real
- * participant would be a way to read a named person's details out of the invitations
- * collection, which no route on this surface offers.
- */
 export const templatePreviewResponse = objectSchema(
   {
     preview: objectSchema(
@@ -952,10 +772,6 @@ export const templatePreviewResponse = objectSchema(
   },
   { required: ['preview'] },
 );
-
-/* -------------------------------------------------------------------------- */
-/* Feedback                                                                    */
-/* -------------------------------------------------------------------------- */
 
 const questionShape = objectSchema(
   {
@@ -1066,13 +882,6 @@ const answerShape = objectSchema(
   { required: ['questionId'] },
 );
 
-/**
- * The instrument's reviewer metadata, as the panel reads it.
- *
- * `quoteConsent` is nullable on purpose and must stay nullable: `false` is a reviewer who
- * declined, `null` is a reviewer who never answered, and a screen that cannot tell them
- * apart is a screen somebody will eventually quote from.
- */
 const reviewerShape = objectSchema({
   name: nullableString(200),
   completedOn: nullableString(32),
@@ -1099,10 +908,6 @@ export const questionnaireResponsesResponse = objectSchema(
   { required: ['responses', 'total'] },
 );
 
-/**
- * One response with the instrument it was answered against, so the screen can show each
- * question as the reviewer saw it — including for a version since archived and reworded.
- */
 export const questionnaireResponseDetailResponse = objectSchema(
   {
     response: questionnaireResponseShape,
@@ -1148,14 +953,6 @@ export const questionnaireResponseSummaryResponse = objectSchema(
   { required: ['total', 'byReadingFormat', 'quoteConsent', 'byQuestion'] },
 );
 
-/**
- * The filters the listing, the summary and the export all accept.
- *
- * One declaration for the three routes on purpose. A summary computed over a wider set than
- * the table beneath it would be quietly wrong in the direction people act on, and an export
- * that ignored a filter would carry more reviewers' words out of the platform than the
- * operator asked for.
- */
 const responseFilters = {
   cohortId: identifier,
   questionnaireId: identifier,
@@ -1168,14 +965,9 @@ const responseFilters = {
 
 export const questionnaireResponsesQuery = listQuery({ ...responseFilters });
 
-/** Paging is meaningless for an aggregate and for an export; both take filters only. */
 export const questionnaireResponseSummaryQuery = objectSchema({ ...responseFilters });
 
 export const questionnaireResponsesExportQuery = questionnaireResponseSummaryQuery;
-
-/* -------------------------------------------------------------------------- */
-/* Free-form feedback                                                          */
-/* -------------------------------------------------------------------------- */
 
 const feedbackPassageShape = objectSchema(
   {
@@ -1188,14 +980,6 @@ const feedbackPassageShape = objectSchema(
   { required: ['unitId'] },
 );
 
-/**
- * One feedback record as the dashboard sees it.
- *
- * There is no `sessionId` here and no reading-progress field of any kind, for the reason
- * given in the file header: a reviewer reads what a person wrote, never where they were.
- * There is likewise no `ageBand` and no `contentLayer` — the band is session state, and a
- * feedback record that carried it beside an email address would break the §9.2.7 wall.
- */
 const feedbackShape = objectSchema(
   {
     id: ulid,
@@ -1204,7 +988,6 @@ const feedbackShape = objectSchema(
     status: enumOf(FEEDBACK_STATUSES),
     body: boundedString(FEEDBACK_BODY_MAX_LENGTH, 1),
     displayName: nullableString(160),
-    // Null unless the reader consented to contact — the document holds no address without it.
     email: nullableString(254),
     contactConsent: { type: 'boolean' },
     passages: arraySchema(feedbackPassageShape, { maxItems: FEEDBACK_MAX_PASSAGES }),
@@ -1230,27 +1013,9 @@ export const feedbackListResponse = objectSchema(
   { required: ['feedback', 'total', 'page'] },
 );
 
-/**
- * A numeric query parameter, declared as digits.
- *
- * The platform's Ajv runs with `coerceTypes: false` — deliberately, so that `"true"` in a
- * request body never becomes `true`. A query string carries no types at all, so a parameter
- * declared as `integer` there can only ever be rejected. It is declared as bounded digits
- * instead and converted once, in the service.
- *
- * @param {number} maxDigits Widest accepted value, in digits.
- * @returns {object} The fragment.
- */
-const digits = (maxDigits) =>
-  Object.freeze({ type: 'string', pattern: `^[1-9][0-9]{0,${maxDigits - 1}}$`, maxLength: maxDigits });
-
-/**
- * Paged by page number rather than by offset: the queue is read as pages of a review list,
- * and the two ways of saying the same thing should not both be accepted on one route.
- */
 export const feedbackQuery = objectSchema({
-  limit: digits(3),
-  page: digits(4),
+  limit: queryCount(3),
+  page: queryCount(4),
   status: enumOf(FEEDBACK_STATUSES),
   category: enumOf(FEEDBACK_CATEGORIES),
   cohortId: identifier,
@@ -1260,7 +1025,6 @@ export const feedbackQuery = objectSchema({
   to: isoDate,
 });
 
-/** The export takes the same filters and no paging: it is the whole filtered set. */
 export const feedbackExportQuery = objectSchema({
   status: enumOf(FEEDBACK_STATUSES),
   category: enumOf(FEEDBACK_CATEGORIES),
@@ -1271,19 +1035,11 @@ export const feedbackExportQuery = objectSchema({
   to: isoDate,
 });
 
-/**
- * Triage only. `body`, `category`, `passages` and the contact fields are absent, so what a
- * reader wrote cannot be edited by the people reviewing it.
- */
 export const updateFeedbackBody = objectSchema({
   status: enumOf(FEEDBACK_STATUSES),
   adminNotes: boundedString(4000),
 });
 
-/**
- * Aggregate counts, and nothing else. Every array here is keyed by a vocabulary or by a
- * manuscript unit; none of them is keyed by a person, and none can be (§10.2).
- */
 export const feedbackSummaryResponse = objectSchema(
   {
     total,
@@ -1309,16 +1065,7 @@ export const feedbackSummaryResponse = objectSchema(
   { required: ['total', 'byCategory', 'byStatus', 'byUnit'] },
 );
 
-/**
- * The CSV body. Declared as a string so the route still carries a response schema, but the
- * handler sends a Buffer — Fastify serialises only what it is asked to serialise, and a JSON
- * serialiser applied to a CSV document would quote and escape the whole file.
- */
 export const csvResponse = Object.freeze({ type: 'string' });
-
-/* -------------------------------------------------------------------------- */
-/* Commerce                                                                    */
-/* -------------------------------------------------------------------------- */
 
 const refundLine = objectSchema(
   {
@@ -1330,10 +1077,6 @@ const refundLine = objectSchema(
   { required: ['amountCents'] },
 );
 
-/**
- * Contributions and orders have separate list shapes, separate routes and separate exports.
- * There is no combined revenue view anywhere in this file, by design (§10.4.5).
- */
 const donationShape = objectSchema(
   {
     id: ulid,
@@ -1403,11 +1146,6 @@ export const ordersQuery = listQuery({
 
 export const orderResponse = objectSchema({ order: orderShape }, { required: ['order'] });
 
-/**
- * `revokeAccess` defaults to false and must be asked for explicitly: §6.8 revokes a
- * transcript grant only when a contribution is reported as made in error, and leaves access
- * intact for a goodwill reversal.
- */
 export const refundBody = objectSchema(
   {
     amountCents: { type: 'integer', minimum: 1, maximum: 100_000_000 },
@@ -1454,10 +1192,6 @@ export const fulfillBody = objectSchema(
   },
   { required: ['trackingNumber'] },
 );
-
-/* -------------------------------------------------------------------------- */
-/* Metrics                                                                     */
-/* -------------------------------------------------------------------------- */
 
 const funnelStep = objectSchema(
   {
@@ -1542,10 +1276,6 @@ export const cohortMetricsResponse = objectSchema(
   { required: ['cohortId', 'funnel', 'reading'] },
 );
 
-/* -------------------------------------------------------------------------- */
-/* Ops                                                                         */
-/* -------------------------------------------------------------------------- */
-
 export const healthDetailResponse = objectSchema(
   {
     status: enumOf(['ok', 'degraded']),
@@ -1571,7 +1301,6 @@ export const healthDetailResponse = objectSchema(
       },
     ),
     mail: objectSchema({ transport: boundedString(16, 1) }, { required: ['transport'] }),
-    // Whether the gateway is live or mocked. No key, no key fingerprint, no endpoint.
     gateway: objectSchema(
       { mode: enumOf(['live', 'mock']) },
       { required: ['mode'] },

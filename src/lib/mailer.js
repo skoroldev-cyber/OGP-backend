@@ -1,23 +1,3 @@
-/**
- * Mail transport abstraction and message templates.
- *
- * Two transports. `log` is the default and the staging posture: it writes a structured
- * record and delivers nothing, which is honest and safe. `smtp` delivers for real through
- * `lib/smtp.js`, an RFC 5321 client written directly on `node:net`/`node:tls` because the
- * locked dependency set (§9.1) admits no mail library.
- *
- * `log` remains the default whenever SMTP is unconfigured: a deployment that forgets
- * `SMTP_HOST` writes its messages to the log instead of failing a founder's send, and the
- * configuration loader warns about it on boot.
- *
- * Every template is linted against `content/rules.json` before it leaves the process.
- * A message that would carry prohibited copy is not sent — it raises.
- *
- * Recipient addresses are masked in logs: the observability rule is "no PII in logs"
- * (§9.10), and a mail log is not an exception to it. Message bodies are never logged at
- * all, and no credential passes through this module's log records.
- */
-
 import config from '../config/index.js';
 import { assertCleanCopy, assertCleanFamilyCopy } from './rulesLint.js';
 import { sendMail, verifyConnection } from './smtp.js';
@@ -26,12 +6,6 @@ const MERCHANT_NAME = 'One Global People';
 const MERCHANT_ADDRESS = '37240 Felt Rd, New Boston, MI 48164';
 const TAX_STATEMENT = 'One Global People will provide tax documentation as applicable.';
 
-/**
- * Mask an address for logging: `reader@example.org` → `r****@example.org`.
- *
- * @param {string} address An email address.
- * @returns {string} The masked form.
- */
 export function maskEmail(address) {
   if (typeof address !== 'string' || !address.includes('@')) return '[address]';
   const [local, domain] = address.split('@');
@@ -49,17 +23,6 @@ function formatDate(value) {
   return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10);
 }
 
-/* -------------------------------------------------------------------------- */
-/* Templates                                                                   */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Founding Reader welcome. The manuscript is never attached — a private reading link only
- * (§14.4.5).
- *
- * @param {{ displayName?: string|null, readingUrl: string, cohortName?: string|null }} input
- * @returns {{ subject: string, text: string }} The message.
- */
 export function betaWelcomeTemplate({ displayName = null, readingUrl, cohortName = null }) {
   const greeting = displayName ? `${displayName},` : 'Hello,';
   const cohortLine = cohortName ? `\nReading group: ${cohortName}\n` : '';
@@ -84,16 +47,6 @@ export function betaWelcomeTemplate({ displayName = null, readingUrl, cohortName
   };
 }
 
-/**
- * Contribution or purchase receipt (§6.12).
- *
- * @param {{ receiptNumber: string, issuedAt: Date|string, amountCents: number,
- *           currency?: string, paymentMethod?: string|null, workflow: 'donation'|'purchase',
- *           providedInReturn?: string|null, receiptUrl?: string|null,
- *           lineItems?: Array<{ description: string, quantity: number, amountCents: number }>
- *         }} input
- * @returns {{ subject: string, text: string }} The message.
- */
 export function receiptTemplate({
   receiptNumber,
   issuedAt,
@@ -138,12 +91,6 @@ export function receiptTemplate({
   };
 }
 
-/**
- * Digital transcript delivery (§6.6, step 5 — delivery is automated, never manual).
- *
- * @param {{ accessUrl: string, receiptNumber?: string|null }} input
- * @returns {{ subject: string, text: string }} The message.
- */
 export function transcriptDeliveryTemplate({ accessUrl, receiptNumber = null }) {
   return {
     subject: `Your digital transcript — ${MERCHANT_NAME}`,
@@ -160,14 +107,6 @@ export function transcriptDeliveryTemplate({ accessUrl, receiptNumber = null }) 
   };
 }
 
-/**
- * "Become Family." acknowledgment. Copy on this pathway is additionally linted against the
- * family vocabulary rule (§9.2.10).
- *
- * @param {{ displayName?: string|null, communicationPreference: 'updates'|'none',
- *           withdrawUrl: string }} input
- * @returns {{ subject: string, text: string }} The message.
- */
 export function familyWelcomeTemplate({
   displayName = null,
   communicationPreference,
@@ -197,13 +136,6 @@ export function familyWelcomeTemplate({
   };
 }
 
-/**
- * Confirmation that a withdrawal has been carried out (§4.3 `POST /family/withdraw`).
- *
- * @param {{ confirmUrl?: string|null, completed?: boolean }} input When `confirmUrl` is
- *        present the message asks for one confirming click; otherwise it confirms removal.
- * @returns {{ subject: string, text: string }} The message.
- */
 export function familyWithdrawalTemplate({ confirmUrl = null, completed = false }) {
   if (!completed && confirmUrl) {
     return {
@@ -232,7 +164,6 @@ export function familyWithdrawalTemplate({ confirmUrl = null, completed = false 
   };
 }
 
-/** Every template, keyed by name, so callers never build a message inline. */
 export const TEMPLATES = Object.freeze({
   beta_welcome: betaWelcomeTemplate,
   receipt: receiptTemplate,
@@ -241,17 +172,8 @@ export const TEMPLATES = Object.freeze({
   family_withdrawal: familyWithdrawalTemplate,
 });
 
-/** Templates whose copy is additionally held to the family vocabulary rule. */
 const FAMILY_TEMPLATES = new Set(['family_welcome', 'family_withdrawal']);
 
-/**
- * Render a template and lint its copy.
- *
- * @param {keyof TEMPLATES} name Template name.
- * @param {object} input Template input.
- * @returns {{ subject: string, text: string }} The linted message.
- * @throws {Error} `PROHIBITED_TERM` when the rendered copy would violate the rules.
- */
 export function renderTemplate(name, input) {
   const template = TEMPLATES[name];
   if (!template) throw new TypeError(`renderTemplate: unknown template "${name}".`);
@@ -262,17 +184,9 @@ export function renderTemplate(name, input) {
   return message;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Transports                                                                  */
-/* -------------------------------------------------------------------------- */
-
 function createLogTransport(logger) {
   return {
     name: 'log',
-    /**
-     * @param {{ to: string, subject: string, text: string, from: string }} message
-     * @returns {Promise<{ delivered: boolean, transport: string }>} Result.
-     */
     async send(message) {
       const record = {
         transport: 'log',
@@ -286,23 +200,12 @@ function createLogTransport(logger) {
       }
       return { delivered: false, transport: 'log' };
     },
-    /**
-     * @returns {Promise<{ ok: boolean, transport: string, reason: string|null }>} Readiness.
-     */
     async verify() {
       return { ok: true, transport: 'log', reason: null };
     },
   };
 }
 
-/**
- * Real delivery. `smtpFrom` is the envelope sender the relay has verified; `from` is the
- * address the reader sees and replies to. On most deployments they are the same address.
- *
- * @param {{ smtpHost: string, smtpPort: number, smtpUser: string, smtpPass: string,
- *           smtpFrom: string, logger: object|null }} options Transport options.
- * @returns {{ name: string, send: Function, verify: Function }} The transport.
- */
 function createSmtpTransport({ smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom, logger }) {
   if (typeof smtpHost !== 'string' || smtpHost === '') {
     throw new Error('mailer: EMAIL_TRANSPORT is "smtp" but SMTP_HOST is empty.');
@@ -312,12 +215,6 @@ function createSmtpTransport({ smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom,
 
   return {
     name: 'smtp',
-    /**
-     * @param {{ to: string, subject: string, text: string, html?: string|null,
-     *           replyTo?: string|null, from: string }} message The message.
-     * @returns {Promise<{ delivered: boolean, transport: string, messageId: string,
-     *                     response: string }>} Result.
-     */
     async send(message) {
       const result = await sendMail(
         {
@@ -326,8 +223,6 @@ function createSmtpTransport({ smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom,
           subject: message.subject,
           text: message.text,
           html: message.html ?? null,
-          // A reply reaches the reader-facing address even when the relay demanded a
-          // different envelope sender.
           replyTo: message.replyTo ?? (smtpFrom && smtpFrom !== message.from ? message.from : null),
         },
         { ...target, logger },
@@ -351,9 +246,6 @@ function createSmtpTransport({ smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom,
         response: result.response,
       };
     },
-    /**
-     * @returns {Promise<{ ok: boolean, transport: string, reason: string|null }>} Readiness.
-     */
     async verify() {
       const probe = await verifyConnection({ ...target, logger });
       return { ok: probe.ok, transport: 'smtp', reason: probe.reason };
@@ -363,20 +255,6 @@ function createSmtpTransport({ smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom,
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/**
- * Build a mailer.
- *
- * The `smtp` transport is selected only when it is actually configured. An `EMAIL_TRANSPORT`
- * of `smtp` with an empty `SMTP_HOST` is already a boot-time configuration error, so the
- * fallback here covers the injected-options case rather than papering over a misconfigured
- * deployment.
- *
- * @param {{ transport?: string, from?: string, smtpHost?: string, smtpPort?: number,
- *           smtpUser?: string, smtpPass?: string, smtpFrom?: string,
- *           logger?: object }} [options] Overrides; defaults come from `config.mail`.
- * @returns {{ transportName: string, send: Function, sendTemplate: Function,
- *             verify: Function }} The mailer.
- */
 export function createMailer(options = {}) {
   const transportName = options.transport ?? config.mail.transport;
   const from = options.from ?? config.mail.from;
@@ -392,13 +270,6 @@ export function createMailer(options = {}) {
       ? createSmtpTransport({ smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom, logger })
       : createLogTransport(logger);
 
-  /**
-   * Send a pre-rendered message.
-   *
-   * @param {{ to: string, subject: string, text: string, html?: string|null,
-   *           replyTo?: string|null }} message The message.
-   * @returns {Promise<{ delivered: boolean, transport: string }>} Result.
-   */
   async function send({ to, subject, text, html = null, replyTo = null }) {
     if (typeof to !== 'string' || !EMAIL_PATTERN.test(to)) {
       const error = new Error('mailer: a valid recipient address is required.');
@@ -412,25 +283,11 @@ export function createMailer(options = {}) {
     return transport.send({ to, subject, text, html, replyTo, from });
   }
 
-  /**
-   * Render a named template and send it.
-   *
-   * @param {keyof TEMPLATES} name Template name.
-   * @param {string} to Recipient address.
-   * @param {object} input Template input.
-   * @returns {Promise<{ delivered: boolean, transport: string }>} Result.
-   */
   async function sendTemplate(name, to, input) {
     const message = renderTemplate(name, input);
     return send({ to, subject: message.subject, text: message.text });
   }
 
-  /**
-   * Probe the transport for the admin health view. Never throws: an unreachable relay is a
-   * reported state, not a failed health request.
-   *
-   * @returns {Promise<{ ok: boolean, transport: string, reason: string|null }>} Readiness.
-   */
   async function verify() {
     try {
       return await transport.verify();

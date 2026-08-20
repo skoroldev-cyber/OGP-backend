@@ -1,46 +1,19 @@
-/**
- * Sharing-prompt administration.
- *
- * Two gates stand between an editor's draft and a reader's screen, and both are enforced
- * here rather than in the dashboard UI:
- *
- * 1. **The prohibited-terms lint.** `prompt_text` is checked against `content/rules.json`
- *    before it can be stored at all — not on activation, not at render time, but on the way
- *    into the database. A prompt containing "join", "share if you care" or any of the other
- *    fifteen terms is refused with `422` and never exists as a record.
- * 2. **Human review.** A prompt declaring `requires_human_review` cannot become `active`
- *    until a person has marked it reviewed, and the reviewer's identifier is stored. The
- *    reviewer prepares; a founder or architect activates (§10.6.3).
- *
- * `frequency` is not writable. The enum has exactly one value, `rare`, and every record is
- * written with it: widening that field is the single most consequential typo available in
- * this codebase, so the field is simply not part of any request shape.
- *
- * The reader-facing sharing service re-checks both gates independently before it will hand
- * out a prompt. Two independent checks of the same rule is the correct amount here.
- */
-
 import { PROMPT_FREQUENCIES, SCHEMA_VERSION } from '../../config/constants.js';
 import { COLLECTIONS, creationStamps, updateStamps } from '../../db/collections.js';
 import { AUDIT_ACTIONS, writeAudit } from '../../lib/audit.js';
 import { newId } from '../../lib/ids.js';
 import { assertCleanCopy } from '../../lib/rulesLint.js';
+import { toFlag, toPaging } from '../../lib/schemas.js';
 import { ApiError } from '../../plugins/errors.js';
 import { toInteger, toIso } from './schemas.js';
 
-/** The locked frequency. Every prompt is written with it; nothing may set another value. */
 const LOCKED_FREQUENCY = PROMPT_FREQUENCIES[0];
 
-/** Audit actions this module writes that `lib/audit.js` does not already name. */
 export const SHARING_AUDIT_ACTIONS = Object.freeze({
   CREATE: 'sharing_prompt.create',
   REVIEW: 'sharing_prompt.review',
 });
 
-/**
- * @param {object} document A `sharing_prompts` document.
- * @returns {object} The dashboard projection.
- */
 export function toSharingPromptResponse(document) {
   return {
     id: document._id,
@@ -63,18 +36,9 @@ export function toSharingPromptResponse(document) {
   };
 }
 
-/**
- * @param {{ db: import('mongodb').Db, logger?: object }} deps Dependencies.
- * @returns {object} The admin sharing service.
- */
 export function createAdminSharingService({ db, logger = null }) {
   const prompts = db.collection(COLLECTIONS.SHARING_PROMPTS);
 
-  /**
-   * @param {string} id A prompt `_id`.
-   * @returns {Promise<object>} The prompt.
-   * @throws {ApiError} 404 when it does not exist.
-   */
   async function requirePrompt(id) {
     const prompt = await prompts.findOne({ _id: id });
     if (!prompt) throw new ApiError(404, 'NOT_FOUND', 'That sharing prompt does not exist.');
@@ -82,16 +46,12 @@ export function createAdminSharingService({ db, logger = null }) {
   }
 
   return {
-    /**
-     * @param {object} query The validated query string.
-     * @returns {Promise<{ prompts: object[], total: number }>} The listing.
-     */
     async list(query = {}) {
       const filter = {};
-      if (typeof query.active === 'boolean') filter.active = query.active;
+      const active = toFlag(query.active);
+      if (active !== undefined) filter.active = active;
       if (query.promptType) filter.prompt_type = query.promptType;
-      const limit = query.limit ?? 50;
-      const skip = query.offset ?? 0;
+      const { limit, skip } = toPaging(query);
       const [documents, count] = await Promise.all([
         prompts.find(filter, { sort: { prompt_id: 1 }, limit, skip }).toArray(),
         prompts.countDocuments(filter),
@@ -99,14 +59,7 @@ export function createAdminSharingService({ db, logger = null }) {
       return { prompts: documents.map(toSharingPromptResponse), total: count };
     },
 
-    /**
-     * @param {object} admin The acting administrator.
-     * @param {object} input The validated body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ prompt: object }>} The created prompt.
-     */
     async create(admin, input, options = {}) {
-      // Before anything else. A prompt carrying prohibited copy never becomes a record.
       assertCleanCopy(input.promptText, 'promptText');
 
       const now = new Date();
@@ -122,7 +75,6 @@ export function createAdminSharingService({ db, logger = null }) {
         requires_human_review: input.requiresHumanReview !== false,
         reviewedBy: null,
         reviewedAt: null,
-        // Never born active. Activation is a separate, deliberate act by a second person.
         active: false,
         notes: input.notes ?? null,
         ...creationStamps(SCHEMA_VERSION, now),
@@ -150,17 +102,6 @@ export function createAdminSharingService({ db, logger = null }) {
       return { prompt: toSharingPromptResponse(document) };
     },
 
-    /**
-     * Update, review and activate. Activation is refused unless review is satisfied, and an
-     * edit to the copy clears an existing review — the reviewer signed for the words that
-     * were in front of them.
-     *
-     * @param {object} admin The acting administrator.
-     * @param {string} id The prompt identifier.
-     * @param {object} input The validated body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ prompt: object }>} The updated prompt.
-     */
     async update(admin, id, input, options = {}) {
       const prompt = await requirePrompt(id);
       const now = new Date();
@@ -177,8 +118,6 @@ export function createAdminSharingService({ db, logger = null }) {
       if ('requiresHumanReview' in input) set.requires_human_review = input.requiresHumanReview;
       if ('notes' in input) set.notes = input.notes;
 
-      // A copy change invalidates the previous review, and cannot ride an existing one into
-      // production alongside an activation in the same request.
       const copyChanged = 'promptText' in input && input.promptText !== prompt.prompt_text;
       if (copyChanged) {
         set.reviewedBy = null;

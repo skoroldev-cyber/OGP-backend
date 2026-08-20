@@ -1,24 +1,4 @@
 #!/usr/bin/env node
-/**
- * Apply collection validators and indexes.
- *
- * Two things happen here, and the order matters. The validators come first because they are
- * the executable form of the anti-profiling rules (§9.5.7): a collection may not declare a
- * birthdate, a gender, an address or an agent string, and MongoDB itself should refuse a
- * document that carries one. The indexes come second because several of them are unique
- * constraints that the application depends on for correctness rather than for speed — a
- * duplicate `tokenHash` would be a session collision, a duplicate NMI `transactionId` would be
- * a double charge.
- *
- * A unique index that cannot be applied is a hard failure (exit 4). Everything else is
- * reported and survivable.
- *
- * Usage:
- *   node scripts/ensure-indexes.mjs [--dry-run]
- *
- * @module scripts/ensure-indexes
- */
-
 import process from 'node:process';
 
 import config from '../src/config/index.js';
@@ -46,8 +26,6 @@ const { flags } = parseArgs();
 helpIfAsked(flags, USAGE);
 const dryRun = Boolean(flags['dry-run']);
 
-// Before touching the database at all: prove the validators themselves are clean. Applying a
-// validator that declares a prohibited field would write the violation into the schema.
 try {
   assertNoProhibitedFields(COLLECTION_VALIDATORS);
 } catch (error) {
@@ -102,8 +80,6 @@ try {
     console.log(style.yellow(`  ${conflicts.length} could not be applied:`));
     for (const conflict of conflicts) console.log(style.dim(`    ${conflict}`));
 
-    // A conflicted unique index is the one case worth stopping for: the application will
-    // behave as though the constraint exists when it does not.
     const blockedUnique = conflicts.filter((conflict) =>
       uniqueSpecs.some(([collection, name]) => conflict.startsWith(`${collection}.${name}`)),
     );

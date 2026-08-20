@@ -1,21 +1,4 @@
 #!/usr/bin/env node
-/**
- * Create an administrator.
- *
- * MFA is mandatory (§9.2.10), so there is no path through this script that produces an account
- * without a TOTP secret. The secret and its `otpauth://` URI are printed exactly once, here,
- * and are never retrievable afterwards — the stored form is what the server needs to verify a
- * code and nothing more.
- *
- * The password is read from `ADMIN_PASSWORD`, never from argv. An argument lands in shell
- * history, in the process table, and in any command log the host keeps.
- *
- * Usage:
- *   ADMIN_PASSWORD='…' node scripts/create-admin.mjs --email=… --role=editor
- *
- * @module scripts/create-admin
- */
-
 import process from 'node:process';
 
 import config from '../src/config/index.js';
@@ -89,7 +72,6 @@ try {
     role,
     passwordHash: await hashPassword(password),
     mfa: {
-      // Not a preference. §9.2.10: "MFA mandatory (workspace security requirement)."
       enabled: true,
       totpSecretEnc: totpSecret,
       enrolledAt: null,

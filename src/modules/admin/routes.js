@@ -1,28 +1,3 @@
-/**
- * Admin routes.
- *
- * Thin adapters, one rule each. Everything of consequence happens in the services; what
- * this file decides is *who may ask*.
- *
- * `requireAdmin([...roles])` guards every route except the two that mint a session, and
- * `requireAdmin()` with no list means "any active administrator with confirmed MFA" — the
- * plugin re-reads the account on every request, so a deactivated admin or a changed role
- * cannot ride a token that was valid a minute ago.
- *
- * Role assignment follows §9.2.10 and §10.8.1:
- *
- *   founder            everything
- *   architect          full technical administration
- *   editor             authors and publishes content
- *   reviewer           approves content, validates resonance, reads responses
- *   beta_coordinator   cohorts, invitations, questionnaires
- *   finance            the two commerce ledgers and refunds
- *
- * Two-person control is not expressible as a role list — an editor may hold both `editor`
- * and the authorship of the unit in front of them — so `approve` and `publish` additionally
- * compare identities inside the content service.
- */
-
 import { createAdminAuthService } from './auth.js';
 import { createAdminBetaService } from './beta.js';
 import { createAdminCommerceService } from './commerce.js';
@@ -127,7 +102,6 @@ import {
   versionsResponse,
 } from './schemas.js';
 
-/** Role sets, named once so a route can never drift from its neighbour by a typo. */
 const ROLES = Object.freeze({
   ANY: [],
   CONTENT_WRITE: ['founder', 'architect', 'editor'],
@@ -139,8 +113,6 @@ const ROLES = Object.freeze({
   SHARING_ACTIVATE: ['founder', 'architect'],
   BETA: ['founder', 'architect', 'beta_coordinator'],
   FEEDBACK_READ: ['founder', 'architect', 'beta_coordinator', 'reviewer'],
-  // Triage and export are narrower than reading: a reviewer reads the queue, a coordinator
-  // works it. The export additionally moves contact details off the platform.
   FEEDBACK_TRIAGE: ['founder', 'architect', 'beta_coordinator'],
   COMMERCE_READ: ['founder', 'architect', 'finance'],
   COMMERCE_REFUND: ['founder', 'finance'],
@@ -148,11 +120,6 @@ const ROLES = Object.freeze({
   OPS: ['founder', 'architect'],
 });
 
-/**
- * @param {import('fastify').FastifyInstance} app The encapsulated instance.
- * @param {{ config: object }} opts Registration options from `app.js`.
- * @returns {Promise<void>} Resolves when the routes are registered.
- */
 export default async function routes(app, opts) {
   const config = opts.config ?? app.config;
   const logger = app.log;
@@ -164,9 +131,6 @@ export default async function routes(app, opts) {
   const sharing = createAdminSharingService({ db, logger });
   const beta = createAdminBetaService({ db, config, logger });
   const templates = createAdminTemplatesService({ db, config, logger });
-  // The templates service is handed over rather than left to be constructed a second time:
-  // seeding is `$setOnInsert` and safe either way, but one instance means one place where a
-  // founder's stored copy is read on the path that actually mails it.
   const invitations = createAdminInvitationsService({ db, config, logger, templates });
   const feedback = createAdminFeedbackService({ db });
   const commerce = createAdminCommerceService({ db, config, logger });
@@ -178,28 +142,12 @@ export default async function routes(app, opts) {
     mongoReady: app.mongoReady?.bind(app) ?? null,
   });
 
-  /** Audit context for every mutation. */
   const context = (request) => ({ correlationId: request.id });
 
-  /**
-   * §10.10.1 requires the admin namespace to carry its own rate limits. This applies the
-   * general budget to every route below that does not name one, rather than repeating a
-   * `config` block sixty times — a list that long is maintained by nobody, and the route that
-   * gets forgotten is the one nobody notices is unprotected.
-   *
-   * Declaring a limit on the route still wins: `adminLogin` keeps its 5-per-15-minutes with
-   * backoff, and the two routes that send mail keep the much tighter `adminBulkSend`.
-   *
-   * This hook is scoped to this encapsulated plugin, so it cannot reach a reader-facing route.
-   */
   app.addHook('onRoute', (route) => {
     if (route.config?.rateLimit) return;
     route.config = { ...(route.config ?? {}), rateLimit: app.rateLimits.adminGeneral };
   });
-
-  /* ---------------------------------------------------------------------- */
-  /* Authentication                                                          */
-  /* ---------------------------------------------------------------------- */
 
   app.post(
     '/admin/auth/login',
@@ -239,10 +187,6 @@ export default async function routes(app, opts) {
       return reply.code(204).send();
     },
   );
-
-  /* ---------------------------------------------------------------------- */
-  /* Content — manuscripts                                                   */
-  /* ---------------------------------------------------------------------- */
 
   app.get(
     '/admin/manuscripts',
@@ -289,10 +233,6 @@ export default async function routes(app, opts) {
       content.updateManuscript(request.admin, request.params.id, request.body, context(request)),
   );
 
-  /* ---------------------------------------------------------------------- */
-  /* Content — units                                                         */
-  /* ---------------------------------------------------------------------- */
-
   app.get(
     '/admin/units',
     {
@@ -336,11 +276,6 @@ export default async function routes(app, opts) {
     },
   );
 
-  /**
-   * The canonical lock lives behind this route: a write touching `canonicalText` on a
-   * published `opening_arc` unit is refused with `423` and recorded as
-   * `canonical_lock.rejected`.
-   */
   app.patch(
     '/admin/units/:id',
     {
@@ -414,10 +349,6 @@ export default async function routes(app, opts) {
     async (request) => content.listVersions(request.params.id),
   );
 
-  /* ---------------------------------------------------------------------- */
-  /* Resonance                                                               */
-  /* ---------------------------------------------------------------------- */
-
   app.get(
     '/admin/resonance-nodes',
     {
@@ -478,10 +409,6 @@ export default async function routes(app, opts) {
       resonance.validate(request.admin, request.params.id, request.body, context(request)),
   );
 
-  /* ---------------------------------------------------------------------- */
-  /* Sharing prompts                                                         */
-  /* ---------------------------------------------------------------------- */
-
   app.get(
     '/admin/sharing-prompts',
     {
@@ -512,10 +439,6 @@ export default async function routes(app, opts) {
     },
   );
 
-  /**
-   * Activation is folded into the update so review state and `active` are decided in one
-   * transaction: a prompt can never be activated by a request that also changed its text.
-   */
   app.patch(
     '/admin/sharing-prompts/:id',
     {
@@ -530,10 +453,6 @@ export default async function routes(app, opts) {
     async (request) =>
       sharing.update(request.admin, request.params.id, request.body, context(request)),
   );
-
-  /* ---------------------------------------------------------------------- */
-  /* Beta                                                                    */
-  /* ---------------------------------------------------------------------- */
 
   app.get(
     '/admin/cohorts',
@@ -623,23 +542,10 @@ export default async function routes(app, opts) {
     },
   );
 
-  /**
-   * Bulk delivery — one message per address, addressed individually, never a shared
-   * envelope: a Founding Reader must not learn who else is reading (§9.2.7).
-   *
-   * A `200` here does not mean every address was written to. Partial failure is the normal
-   * case and comes back as a row per address; the only things that throw are a refused
-   * cohort and a prohibited term in the coordinator's added line, both of which are one
-   * decision about the whole batch rather than a fact about one mailbox.
-   */
   app.post(
     '/admin/invitations/send',
     {
       preHandler: app.requireAdmin(ROLES.BETA),
-      // The tight budget, not the general one: this is the request whose effect leaves the
-      // building. It counts presses, not addresses — one call carrying two hundred
-      // invitations costs one — so it bounds the double-submitted batch without bounding how
-      // many Founding Readers a coordinator may write to. Mail cannot be recalled.
       config: { rateLimit: app.rateLimits.adminBulkSend },
       schema: {
         headers: adminHeaders,
@@ -665,18 +571,10 @@ export default async function routes(app, opts) {
       beta.updateInvitation(request.admin, request.params.id, request.body, context(request)),
   );
 
-  /**
-   * The deliberate, named, one-at-a-time repeat. It exists so that a bulk send never has to
-   * become a reminder sequence: a second pass over a list skips whoever already holds a
-   * link, and this route is the audited way to write to one of them again on purpose.
-   */
   app.post(
     '/admin/invitations/:id/resend',
     {
       preHandler: app.requireAdmin(ROLES.BETA),
-      // Shares the mail budget with the bulk route, and deliberately so: chasing a list one
-      // address at a time is the same act as sending to it, and a limit either could sidestep
-      // by using the other would not be a limit.
       config: { rateLimit: app.rateLimits.adminBulkSend },
       schema: {
         headers: adminHeaders,
@@ -689,10 +587,6 @@ export default async function routes(app, opts) {
       invitations.resend(request.admin, request.params.id, request.body ?? {}, context(request)),
   );
 
-  /**
-   * Withdrawal is recorded, never deleted: a participant's place in the funnel is study data,
-   * and erasing it would falsify the record of who was approached (§10.7.2).
-   */
   app.post(
     '/admin/invitations/:id/revoke',
     {
@@ -735,19 +629,6 @@ export default async function routes(app, opts) {
     async (request) => beta.importInvitations(request.admin, request.body, context(request)),
   );
 
-  /* ---------------------------------------------------------------------- */
-  /* Beta — message templates                                                */
-  /* ---------------------------------------------------------------------- */
-
-  /**
-   * The set is closed and there is no `POST`: §10.6.4 rules out email campaign tooling, and
-   * a route that could create a new message type with a recipient list is exactly that. Copy
-   * can be rewritten; a third message cannot be invented from the dashboard.
-   *
-   * Every one of these is linted against `content/rules.json` inside the service, which
-   * refuses a prohibited term with a `422` naming it. The lint is not repeated here — a
-   * second copy of it would be a second thing to keep in step with the rules file.
-   */
   app.get(
     '/admin/templates',
     {
@@ -788,10 +669,6 @@ export default async function routes(app, opts) {
       templates.update(request.admin, request.params.key, request.body, context(request)),
   );
 
-  /**
-   * Render, and send nothing. The same lint runs on the draft, so a preview cannot be used
-   * to see what refused copy would have looked like in a reader's inbox.
-   */
   app.post(
     '/admin/templates/:key/preview',
     {
@@ -805,10 +682,6 @@ export default async function routes(app, opts) {
     },
     async (request) => templates.preview(request.params.key, request.body ?? {}),
   );
-
-  /* ---------------------------------------------------------------------- */
-  /* Feedback                                                                */
-  /* ---------------------------------------------------------------------- */
 
   app.get(
     '/admin/questionnaires',
@@ -859,11 +732,6 @@ export default async function routes(app, opts) {
       feedback.updateQuestionnaire(request.admin, request.params.id, request.body, context(request)),
   );
 
-  /**
-   * Returned instruments. `summary` and `export.csv` are declared before `:id` so the file
-   * reads in the order an operator meets them; the router prefers a static segment over a
-   * parametric one regardless.
-   */
   app.get(
     '/admin/questionnaire-responses',
     {
@@ -890,11 +758,6 @@ export default async function routes(app, opts) {
     async (request) => feedback.summariseResponses(request.query),
   );
 
-  /**
-   * Gated on `FEEDBACK_TRIAGE` rather than `FEEDBACK_READ`, as the feedback export is: a
-   * reviewer may read responses in the panel, where they are bounded and audited, without
-   * being able to take a reviewer's name and every paragraph they wrote out of it.
-   */
   app.get(
     '/admin/questionnaire-responses/export.csv',
     {
@@ -931,10 +794,6 @@ export default async function routes(app, opts) {
     async (request) => feedback.getResponse(request.params.id),
   );
 
-  /**
-   * The free-form feedback queue. `summary` and `export.csv` are declared before `:id` for
-   * readability; the router prefers a static segment over a parametric one regardless.
-   */
   app.get(
     '/admin/feedback',
     {
@@ -961,10 +820,6 @@ export default async function routes(app, opts) {
     async (request) => feedback.summariseFeedback(request.query),
   );
 
-  /**
-   * The CSV is sent as a Buffer so Fastify's JSON serialiser never touches it, and with a
-   * `Content-Disposition` filename because the file is opened by a human, elsewhere, later.
-   */
   app.get(
     '/admin/feedback/export.csv',
     {
@@ -1011,10 +866,6 @@ export default async function routes(app, opts) {
     async (request) =>
       feedback.updateFeedback(request.admin, request.params.id, request.body, context(request)),
   );
-
-  /* ---------------------------------------------------------------------- */
-  /* Commerce — two ledgers, never merged                                    */
-  /* ---------------------------------------------------------------------- */
 
   app.get(
     '/admin/donations',
@@ -1087,10 +938,6 @@ export default async function routes(app, opts) {
       commerce.fulfillOrder(request.admin, request.params.id, request.body, context(request)),
   );
 
-  /* ---------------------------------------------------------------------- */
-  /* Metrics — aggregate only                                                */
-  /* ---------------------------------------------------------------------- */
-
   app.get(
     '/admin/metrics/funnel',
     {
@@ -1129,10 +976,6 @@ export default async function routes(app, opts) {
     },
     async (request) => metrics.cohortMetrics(request.params.id),
   );
-
-  /* ---------------------------------------------------------------------- */
-  /* Ops                                                                     */
-  /* ---------------------------------------------------------------------- */
 
   app.get(
     '/admin/health/detail',

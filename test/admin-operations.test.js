@@ -1,28 +1,3 @@
-/**
- * The operations panel's delivery surface — message templates and invitation sending.
- *
- * These are the routes that put founder-authored copy in front of a stranger who did not ask
- * for it, so the properties worth proving are the refusals and the escapes rather than the
- * happy path:
- *
- *  - **Every substituted value is escaped for its destination.** A display name imported from
- *    a spreadsheet reaches an HTML body, a plain-text body and a subject header. In the HTML
- *    it is entity-escaped; in the subject it can never open a second header; and nothing that
- *    is not one of the four known names is interpreted at all — the substituter is not a
- *    template engine, and stored data reaching an expression evaluator is a server-side
- *    injection surface (§10.6.2, `admin/templates.js`).
- *  - **The copy lint has no override.** A prohibited term is a `422` naming the term, the
- *    draft is not stored, and nothing is written to the audit trail — because nothing changed.
- *  - **Partial failure is the normal case and is reported, never thrown.** A relay that
- *    refuses one mailbox has not invalidated the rest of the cohort, so every address comes
- *    back with `sent`, `skipped` or `failed` and a short reason. The audit entry records the
- *    counts and not the list: copying a cohort's addresses into an append-only collection
- *    would put PII somewhere it can never be corrected or erased (§9.5).
- *  - **The export survives a spreadsheet.** Reader feedback contains commas, quotes and
- *    newlines constantly, so the file is checked by parsing it back rather than by eyeballing
- *    a substring: what a reader wrote must be recoverable from the CSV field for field.
- */
-
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -50,7 +25,6 @@ import {
 } from '../src/modules/admin/templates.js';
 import { createMemoryDb } from './helpers/memory-db.js';
 
-/** A silent app over a fresh in-memory database. */
 async function makeApp() {
   const db = createMemoryDb();
   db.collection(COLLECTIONS.INVITATIONS).declareUnique(['code']);
@@ -64,11 +38,6 @@ async function makeApp() {
   return { app, db };
 }
 
-/**
- * An enrolled administrator and a bearer header for them. The login route proves password and
- * TOTP; this mints the token that route would have issued, so the authorisation rules can be
- * exercised without rebuilding the credential ceremony in every test.
- */
 async function adminAuth(db, role = 'beta_coordinator') {
   const id = `01JADMIN0000000000000000${role.slice(0, 1).toUpperCase()}Z`;
   await db.collection(COLLECTIONS.ADMIN_USERS).insertOne({
@@ -91,45 +60,32 @@ async function adminAuth(db, role = 'beta_coordinator') {
   return { authorization: `Bearer ${token}` };
 }
 
-/* ------------------------------------------------------------------ */
-/* Substitution                                                        */
-/* ------------------------------------------------------------------ */
-
 test('every substituted value is escaped for where it lands', () => {
   assert.equal(escapeHtml('<script>'), '&lt;script&gt;');
   assert.equal(escapeHtml('Tom & "Jerry"'), 'Tom &amp; &quot;Jerry&quot;');
   assert.equal(escapeHtml("O'Neill"), 'O&#39;Neill');
-  // Ampersands first, or an escape would be escaped a second time.
   assert.equal(escapeHtml('&lt;'), '&amp;lt;');
 
   const hostile = '<img src=x onerror="alert(1)">';
 
-  // The HTML body entity-escapes; the text body does not, because there is nothing there to
-  // escape into — a plain-text message has no markup to break out of.
   assert.equal(
     substitute('<p>{{displayName}}</p>', { displayName: hostile }, { html: true }),
     '<p>&lt;img src=x onerror=&quot;alert(1)&quot;&gt;</p>',
   );
   assert.equal(substitute('{{displayName}},', { displayName: hostile }), `${hostile},`);
 
-  // An attribute is the other destination, and it is escaped by the same pass: the quote that
-  // would close `href="` is gone before the value is ever concatenated.
   assert.ok(
     !substitute('<a href="{{invitationUrl}}">link</a>', { invitationUrl: '" onclick="x' }, {
       html: true,
     }).includes('" onclick='),
   );
 
-  // A subject is a header. CR and LF are removed rather than escaped, because a name imported
-  // from a spreadsheet must never be able to open a second header.
   const subject = substitute('Reading link for {{displayName}}', {
     displayName: 'Ada\r\nBcc: someone@example.org',
   }, { singleLine: true });
   assert.ok(!/[\r\n]/.test(subject), 'a newline survived into a subject header');
   assert.equal(subject, 'Reading link for Ada Bcc: someone@example.org');
 
-  // Not a template engine. Anything that is not one of the four names is left exactly as
-  // written — it is never looked up, and never evaluated.
   assert.equal(TEMPLATE_PLACEHOLDERS.length, 4);
   assert.equal(
     substitute('{{constructor}} {{__proto__}} {{cohortName}}', { cohortName: 'First cohort' }),
@@ -148,13 +104,8 @@ test('every substituted value is escaped for where it lands', () => {
   assert.equal(message.text.split('\n')[0], 'A & B <reader>');
   assert.equal(message.html, '<p>A &amp; B &lt;reader&gt;</p><p>https://example.org</p>');
 
-  // No HTML body means no HTML message, rather than an empty one.
   assert.equal(renderCopy({ subject: 'x', bodyText: 'y', bodyHtml: null }, {}).html, null);
 });
-
-/* ------------------------------------------------------------------ */
-/* Template copy                                                       */
-/* ------------------------------------------------------------------ */
 
 test('a prohibited term refuses the copy, names itself, and changes nothing', async (t) => {
   const { app, db } = await makeApp();
@@ -183,12 +134,8 @@ test('a prohibited term refuses the copy, names itself, and changes nothing', as
 
   assert.equal(refused.statusCode, 422, refused.body);
   assert.equal(refused.json().error.code, 'PROHIBITED_TERM');
-  // The founder is told which term, not that "validation failed" — there is no override, so
-  // the message has to be enough to rewrite the line.
   assert.match(refused.json().error.message, /"join us"/);
 
-  // The preview is held to the same lint, so it cannot be used to see what refused copy would
-  // have looked like in a reader's inbox.
   const previewed = await app.inject({
     method: 'POST',
     url: '/api/v1/admin/templates/beta_invitation/preview',
@@ -198,7 +145,6 @@ test('a prohibited term refuses the copy, names itself, and changes nothing', as
   assert.equal(previewed.statusCode, 422, previewed.body);
   assert.equal(previewed.json().error.code, 'PROHIBITED_TERM');
 
-  // Every message this collection holds exists to carry one private reading link.
   const linkless = await app.inject({
     method: 'PUT',
     url: '/api/v1/admin/templates/beta_invitation',
@@ -227,7 +173,6 @@ test('a prohibited term refuses the copy, names itself, and changes nothing', as
   const entries = await db.collection(COLLECTIONS.AUDIT_LOG).find({}).toArray();
   assert.equal(entries.length, 0, 'a refusal wrote to the audit trail; nothing changed');
 
-  // An accepted rewrite does bump the version and is audited.
   const accepted = await app.inject({
     method: 'PUT',
     url: '/api/v1/admin/templates/beta_invitation',
@@ -246,7 +191,6 @@ test('a prohibited term refuses the copy, names itself, and changes nothing', as
   assert.equal(audited.length, 1);
   assert.equal(audited[0].action, 'email_template.update');
 
-  // The set is closed: copy can be rewritten, a third message cannot be invented here.
   const invented = await app.inject({
     method: 'PUT',
     url: '/api/v1/admin/templates/newsletter',
@@ -255,7 +199,6 @@ test('a prohibited term refuses the copy, names itself, and changes nothing', as
   });
   assert.equal(invented.statusCode, 404, invented.body);
 
-  // Templates are Founding Reader operations, not editorial content.
   const asEditor = await adminAuth(db, 'editor');
   const forbidden = await app.inject({
     method: 'GET',
@@ -265,17 +208,6 @@ test('a prohibited term refuses the copy, names itself, and changes nothing', as
   assert.equal(forbidden.statusCode, 403, forbidden.body);
 });
 
-/* ------------------------------------------------------------------ */
-/* Bulk delivery                                                       */
-/* ------------------------------------------------------------------ */
-
-/**
- * A transport that accepts everything except the addresses it is told to refuse. Nothing
- * leaves the process, and the outbox records exactly what would have.
- *
- * @param {Set<string>} refuse Addresses the relay rejects.
- * @returns {{ outbox: object[], send: Function }} The stub.
- */
 function stubTransport(refuse = new Set()) {
   const outbox = [];
   return {
@@ -304,8 +236,6 @@ test('a bulk send answers for every address, and one refusal does not spoil the 
     ...creationStamps(1),
   });
 
-  // Someone who already holds a link. A second pass over the same list skips them rather than
-  // writing again: a reminder sequence is a drip campaign wearing a study's clothes.
   await db.collection(COLLECTIONS.INVITATIONS).insertOne({
     _id: 'INV-HELD',
     cohortId: 'COHORT-1',
@@ -338,14 +268,11 @@ test('a bulk send answers for every address, and one refusal does not spoil the 
     { correlationId: 'CORR-1' },
   );
 
-  // The repeated address is written to once, in the order the coordinator typed.
   assert.deepEqual(
     outcome.results.map((entry) => entry.email),
     ['reader.one@example.org', 'refused@example.org', 'not an address', 'held@example.org'],
   );
 
-  // Every row is exactly the three declared fields, so the panel can render a table without
-  // guarding each cell.
   for (const entry of outcome.results) {
     assert.deepEqual(Object.keys(entry).sort(), ['email', 'reason', 'status']);
     assert.ok(['sent', 'skipped', 'failed'].includes(entry.status));
@@ -376,15 +303,11 @@ test('a bulk send answers for every address, and one refusal does not spoil the 
     { sent: 1, skipped: 1, failed: 2 },
   );
 
-  // One message per address, addressed individually: a Founding Reader must not learn who
-  // else is reading, and a cohort list on a shared envelope is exactly that disclosure.
   assert.equal(mailer.outbox.length, 1);
   assert.equal(mailer.outbox[0].to, 'reader.one@example.org');
   assert.ok(!mailer.outbox[0].to.includes(','));
   assert.ok(!mailer.outbox[0].text.includes('held@example.org'));
 
-  // A record that claims `invited` always means a message was accepted. A failed send leaves
-  // the record where it was, with a short reason, which is retryable.
   const sent = await db.collection(COLLECTIONS.INVITATIONS).findOne({ email: 'reader.one@example.org' });
   assert.equal(sent.status, 'invited');
   assert.ok(sent.readingLinkSentAt instanceof Date);
@@ -396,8 +319,6 @@ test('a bulk send answers for every address, and one refusal does not spoil the 
   assert.equal(failed.lastError, 'mail_recipient_rejected');
   assert.equal(failed.sendCount, 0);
 
-  // The trail records counts, not the list: five hundred addresses copied into an append-only
-  // collection would be PII somewhere it can never be corrected or erased (§9.5).
   const [entry] = await db.collection(COLLECTIONS.AUDIT_LOG).find({}).toArray();
   assert.equal(entry.action, 'invitation.send_bulk');
   assert.equal(entry.after.sent, 1);
@@ -420,8 +341,6 @@ test('a coordinator\'s added line is held to the same rules as the message it ri
     templates: createAdminTemplatesService({ db, config }),
   });
 
-  // The line is one decision about the whole batch, so it refuses the request outright: half a
-  // cohort carrying prohibited copy would be worse than none of it.
   await assert.rejects(
     () =>
       service.sendBulk(
@@ -435,10 +354,6 @@ test('a coordinator\'s added line is held to the same rules as the message it ri
   assert.equal(await db.collection(COLLECTIONS.INVITATIONS).countDocuments({}), 0);
   assert.equal(await db.collection(COLLECTIONS.AUDIT_LOG).countDocuments({}), 0);
 });
-
-/* ------------------------------------------------------------------ */
-/* Export                                                              */
-/* ------------------------------------------------------------------ */
 
 test('the export survives quotes, commas and newlines because it is parsed back', async () => {
   const db = createMemoryDb();
@@ -473,8 +388,6 @@ test('the export survives quotes, commas and newlines because it is parsed back'
   const { csv, rows } = await service.exportFeedbackCsv({ _id: 'ADMIN-1' }, {});
   assert.equal(rows, 1);
 
-  // Eyeballing a substring proves the file looks right; parsing it proves it *is* right, which
-  // is the only thing a spreadsheet cares about.
   const parsed = parseCsv(csv);
   assert.equal(parsed.length, 2, 'a newline inside a field became a new record');
   assert.deepEqual(parsed[0], [...FEEDBACK_EXPORT_COLUMNS]);
@@ -490,11 +403,9 @@ test('the export survives quotes, commas and newlines because it is parsed back'
   assert.equal(record.submitted_at, '2026-01-02T03:04:05.000Z');
   assert.equal(record.id, 'FB-AWKWARD');
 
-  // Doubled, not backslash-escaped: RFC 4180 §2.7, and the only form a spreadsheet reads.
   assert.ok(csv.includes('"She said ""stop, right there"".'));
   assert.ok(!csv.includes('\\"'), 'a backslash escape reached the file');
 
-  // Records are CRLF-separated even though a field may contain a bare LF of its own.
   assert.ok(csv.endsWith('\r\n'));
   assert.ok(!csv.includes('SESSION-1'), 'the reading trail reached the export');
 });

@@ -1,33 +1,5 @@
-/**
- * A small in-memory stand-in for the MongoDB driver surface this codebase actually uses.
- *
- * The alternative — `mongodb-memory-server` — downloads a real mongod binary on first run.
- * That makes the test suite dependent on a network at install time and slow at run time, and
- * §13's CI posture wants `npm test` to be something a contributor runs constantly. The service
- * layer only reaches for nine operations, so implementing those honestly is cheaper and keeps
- * the suite hermetic.
- *
- * What is faithful: `_id` handling, `$set`/`$unset`/`$inc`/`$push`/`$setOnInsert`, upserts,
- * `returnDocument`, equality/`$in`/`$ne`/`$exists`/`$gte`/`$lte` filters, dotted paths into
- * arrays of sub-documents, sort/limit/skip, unique-index violations (error code 11000), and
- * deep-cloning on the way in and out so a test cannot mutate stored state by holding a
- * reference.
- *
- * What is not: aggregation pipelines beyond `$match`/`$group`/`$sort`/`$limit`, geospatial
- * anything, and transactions. Nothing on the hot paths uses those — §9.8 forbids cross-document
- * transactions on hot paths outright — and a test that needs more should use a real database.
- */
-
 const clone = (value) => (value === undefined ? undefined : structuredClone(value));
 
-/**
- * Read `a.b.c` out of a document.
- *
- * When a segment lands on an array of sub-documents, the remaining key is resolved across
- * its elements and the collected values are returned — MongoDB's own semantics, and what
- * makes `{ 'passages.unitId': 'CU-A' }` match a feedback record that marked that unit among
- * several. `valuesEqual` then treats the collection as "any of these".
- */
 function getPath(document, path) {
   return path.split('.').reduce((node, key) => {
     if (node == null) return undefined;
@@ -41,7 +13,6 @@ function getPath(document, path) {
   }, document);
 }
 
-/** Write `a.b.c`, creating intermediate objects. */
 function setPath(document, path, value) {
   const keys = path.split('.');
   const last = keys.pop();
@@ -53,7 +24,6 @@ function setPath(document, path, value) {
   node[last] = value;
 }
 
-/** Delete `a.b.c`. */
 function unsetPath(document, path) {
   const keys = path.split('.');
   const last = keys.pop();
@@ -68,7 +38,6 @@ function unsetPath(document, path) {
 const isPlainObject = (value) =>
   value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Date);
 
-/** One field condition: a literal, or an operator object. */
 function matchesCondition(actual, condition) {
   if (isPlainObject(condition)) {
     for (const [operator, operand] of Object.entries(condition)) {
@@ -133,7 +102,6 @@ function compare(a, b) {
   return left > right ? 1 : -1;
 }
 
-/** Top-level filter, including `$and`/`$or`/`$nor`. */
 function matchesFilter(document, filter = {}) {
   for (const [key, condition] of Object.entries(filter)) {
     if (key === '$and') {
@@ -149,7 +117,6 @@ function matchesFilter(document, filter = {}) {
   return true;
 }
 
-/** Apply an update document (operators, or a whole-document replacement). */
 function applyUpdate(document, update) {
   const hasOperators = Object.keys(update).some((key) => key.startsWith('$'));
   if (!hasOperators) {
@@ -225,7 +192,6 @@ function applyUpdate(document, update) {
   return document;
 }
 
-/** Project a stored document down to the requested fields. */
 function project(document, projection) {
   if (!projection || Object.keys(projection).length === 0) return clone(document);
   const including = Object.entries(projection).some(([key, value]) => value && key !== '_id');
@@ -265,11 +231,9 @@ class MemoryCollection {
   constructor(name) {
     this.name = name;
     this.documents = new Map();
-    /** @type {Array<{ keys: string[], name: string }>} */
     this.uniqueIndexes = [];
   }
 
-  /** Declare a unique index so the tests can prove a duplicate is actually refused. */
   declareUnique(keys, name = keys.join('_')) {
     this.uniqueIndexes.push({ keys, name });
     return this;
@@ -347,8 +311,6 @@ class MemoryCollection {
         for (const document of results) yield project(document, options.projection);
       },
     };
-    // Skip before limit, as the server does: applying them the other way round makes every
-    // page after the first come back empty.
     if (options.skip) cursor.skip(options.skip);
     if (options.limit) cursor.limit(options.limit);
     return cursor;
@@ -366,7 +328,6 @@ class MemoryCollection {
         return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId: null };
       }
       const seed = {};
-      // Equality terms in the filter seed the upserted document, as the real driver does.
       for (const [key, condition] of Object.entries(filter)) {
         if (!key.startsWith('$') && !isPlainObject(condition)) setPath(seed, key, clone(condition));
       }
@@ -429,7 +390,6 @@ class MemoryCollection {
     return { acknowledged: true, deletedCount: matched.length };
   }
 
-  /** `$match` / `$sort` / `$limit` / `$group` (with `$sum` and `$first`) only. */
   aggregate(pipeline = []) {
     let documents = [...this.documents.values()].map(clone);
 
@@ -501,7 +461,6 @@ class MemoryCollection {
     return { toArray: async () => documents };
   }
 
-  // Index management is a no-op: uniqueness is declared through `declareUnique`.
   async createIndex() {
     return 'ok';
   }
@@ -515,7 +474,6 @@ class MemoryCollection {
   }
 }
 
-/** An in-memory `db` with the surface the services use. */
 export function createMemoryDb() {
   const collections = new Map();
 
@@ -527,7 +485,6 @@ export function createMemoryDb() {
     async command() {
       return { ok: 1 };
     },
-    /** Test-only: reach a collection to seed or inspect it. */
     _collection(name) {
       return this.collection(name);
     },

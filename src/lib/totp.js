@@ -1,29 +1,12 @@
-/**
- * RFC 6238 time-based one-time passwords, built on `node:crypto`.
- *
- * MFA is mandatory for every admin account (§9.2.10). 30-second step, 6 digits,
- * SHA-1 (the algorithm every authenticator app implements), ±1 step of drift.
- *
- * The shared secret is a per-admin value stored as `admin_users.mfa.totpSecretEnc`.
- * Nothing here logs or returns a secret except the explicit provisioning helpers, which
- * are reachable only from the admin creation flow.
- */
-
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 const DEFAULT_STEP_SECONDS = 30;
 const DEFAULT_DIGITS = 6;
 const DEFAULT_WINDOW = 1;
-const DEFAULT_SECRET_BYTES = 20; // 160 bits — the RFC 4226 recommendation.
+const DEFAULT_SECRET_BYTES = 20;
 const DIGIT_MODULUS = [1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000];
 
-/**
- * Encode bytes as RFC 4648 base32 without padding.
- *
- * @param {Buffer} buffer Raw bytes.
- * @returns {string} Base32 text.
- */
 export function base32Encode(buffer) {
   let bits = 0;
   let value = 0;
@@ -40,14 +23,6 @@ export function base32Encode(buffer) {
   return out;
 }
 
-/**
- * Decode RFC 4648 base32. Padding, whitespace and lowercase are tolerated because humans
- * retype these secrets.
- *
- * @param {string} text Base32 text.
- * @returns {Buffer} Raw bytes.
- * @throws {TypeError} When the text contains a non-base32 symbol.
- */
 export function base32Decode(text) {
   if (typeof text !== 'string') throw new TypeError('base32Decode: input must be a string.');
   const normalized = text.replace(/[\s=]/g, '').toUpperCase();
@@ -67,12 +42,6 @@ export function base32Decode(text) {
   return Buffer.from(bytes);
 }
 
-/**
- * Generate a fresh TOTP secret.
- *
- * @param {number} [bytes] Secret length in bytes. Defaults to 20 (160 bits).
- * @returns {string} Base32-encoded secret.
- */
 export function generateTotpSecret(bytes = DEFAULT_SECRET_BYTES) {
   if (!Number.isInteger(bytes) || bytes < 16 || bytes > 64) {
     throw new RangeError('generateTotpSecret: bytes must be an integer between 16 and 64.');
@@ -86,14 +55,6 @@ function counterBuffer(counter) {
   return buffer;
 }
 
-/**
- * HOTP (RFC 4226) for a specific counter.
- *
- * @param {Buffer} secret Raw secret bytes.
- * @param {number} counter Moving factor.
- * @param {number} digits Code length.
- * @returns {string} Zero-padded code.
- */
 function hotp(secret, counter, digits) {
   const digest = createHmac('sha1', secret).update(counterBuffer(counter)).digest();
   const offset = digest[digest.length - 1] & 0x0f;
@@ -105,13 +66,6 @@ function hotp(secret, counter, digits) {
   return String(binary % DIGIT_MODULUS[digits]).padStart(digits, '0');
 }
 
-/**
- * Generate the TOTP code for an instant. Exposed for provisioning verification and tests.
- *
- * @param {string} secret Base32 secret.
- * @param {{ timestamp?: number, stepSeconds?: number, digits?: number }} [options] Options.
- * @returns {string} The current code.
- */
 export function generateTotp(secret, options = {}) {
   const {
     timestamp = Date.now(),
@@ -125,18 +79,6 @@ export function generateTotp(secret, options = {}) {
   return hotp(base32Decode(secret), counter, digits);
 }
 
-/**
- * Verify a submitted TOTP code against the ±window steps around now.
- *
- * The comparison is constant-time and the returned `delta` lets the caller reject replay
- * of a code already consumed in this step.
- *
- * @param {string} secret Base32 secret.
- * @param {string} code Submitted code.
- * @param {{ timestamp?: number, stepSeconds?: number, digits?: number, window?: number }}
- *        [options] Options.
- * @returns {{ valid: boolean, delta?: number }} Result; `delta` is the matching step offset.
- */
 export function verifyTotp(secret, code, options = {}) {
   const {
     timestamp = Date.now(),
@@ -159,8 +101,6 @@ export function verifyTotp(secret, code, options = {}) {
 
   const counter = Math.floor(timestamp / 1000 / stepSeconds);
   const submittedBuffer = Buffer.from(submitted, 'utf8');
-  // Every step in the window is evaluated even after a match, so verification takes the
-  // same time whether the code was right, wrong, or right one step ago.
   let matched = false;
   let matchDelta = 0;
   for (let delta = -window; delta <= window; delta += 1) {
@@ -175,13 +115,6 @@ export function verifyTotp(secret, code, options = {}) {
   return matched ? { valid: true, delta: matchDelta } : { valid: false };
 }
 
-/**
- * Build the `otpauth://` provisioning URI an authenticator app scans.
- *
- * @param {{ secret: string, accountName: string, issuer?: string, digits?: number,
- *           periodSeconds?: number }} input Provisioning details.
- * @returns {string} The otpauth URI.
- */
 export function buildOtpAuthUri({
   secret,
   accountName,

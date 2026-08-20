@@ -1,15 +1,3 @@
-/**
- * Session routes.
- *
- * `POST /sessions` is the only public write on the reading path, rate limited to 10 per
- * hour per address. The address is used transiently as a limiter key and is never written
- * to a document or a log line.
- *
- * Everything else here requires the bearer token minted by that route. A missing, unknown
- * or expired token produces the same `401 SESSION_REQUIRED`, so an opaque string cannot be
- * probed for existence.
- */
-
 import { createSessionsService } from './service.js';
 import {
   createSessionBody,
@@ -23,11 +11,6 @@ import {
   sessionHeaders,
 } from './schemas.js';
 
-/**
- * @param {import('fastify').FastifyInstance} app The encapsulated instance.
- * @param {{ config: object }} opts Registration options from `app.js`.
- * @returns {Promise<void>} Resolves when the routes are registered.
- */
 export default async function routes(app, opts) {
   const appConfig = opts.config ?? app.config;
   const service = createSessionsService({

@@ -1,33 +1,9 @@
-/**
- * Process entry point.
- *
- * Boot: load configuration (which fails fast in production), build the app, listen.
- *
- * Shutdown on SIGTERM or SIGINT, in this order:
- *   1. Stop accepting new work — Fastify answers in-flight requests and returns 503 to
- *      anything arriving after the close begins.
- *   2. Flush the event buffer. The event write path is fire-and-forget and batched; a
- *      redeploy must not silently discard a reader's completed chapter. The events module
- *      decorates `app.flushEvents` (and/or registers its own `onClose` hook); both are
- *      honoured here.
- *   3. Close the Mongo connection (the mongo plugin's `onClose` hook).
- *
- * A hard timer bounds the whole sequence. A process that will not leave must be made to.
- */
-
 import config from './config/index.js';
 import { buildApp } from './app.js';
 
 let app = null;
 let shuttingDown = false;
 
-/**
- * Run the graceful shutdown sequence exactly once.
- *
- * @param {string} signal The signal or reason that triggered shutdown.
- * @param {number} [exitCode] Process exit code.
- * @returns {Promise<void>} Resolves just before the process exits.
- */
 async function shutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -61,11 +37,6 @@ async function shutdown(signal, exitCode = 0) {
   process.exit(exitCode);
 }
 
-/**
- * Boot the service.
- *
- * @returns {Promise<void>} Resolves once the listener is bound.
- */
 async function start() {
   app = await buildApp({ config });
 
@@ -107,7 +78,6 @@ process.on('uncaughtException', (error) => {
 try {
   await start();
 } catch (error) {
-  // The logger may not exist yet — a configuration failure happens before the app does.
   console.error('[ogp-api] failed to start:', error.message);
   process.exitCode = 1;
   if (app) await shutdown('startupFailure', 1);

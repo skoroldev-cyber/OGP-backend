@@ -1,25 +1,4 @@
 #!/usr/bin/env node
-/**
- * Opening Arc manuscript ingestion.
- *
- * Reads the governing display text — the Beta Reader Edition v2.0 .docx — and emits an
- * immutable, checksummed certified release: `content/generated/release.json` plus one
- * JSON file per ManuscriptUnit under `content/generated/units/`.
- *
- * Laws this script exists to enforce:
- *   - The Opening Arc text is immutable. It is extracted, never edited, never re-authored.
- *   - The twelve protected components render in the LOCKED order (master doc 3.5.2).
- *   - `blocks[]` is the only render contract (BUILD_CONTRACT 6). Nothing else is emitted.
- *   - Bold and italic emphasis exists only in the DOCX and MUST survive ingestion (master 3.4.1).
- *   - Authored line breaks are semantic. Stanzas are never re-wrapped.
- *
- * Usage:
- *   node scripts/ingest-manuscript.mjs [--source=<path.docx>] [--out=<dir>]
- *                                      [--release=<REL-...>] [--dry-run]
- *
- * @module scripts/ingest-manuscript
- */
-
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,10 +9,6 @@ import { extractDocumentXml, parseParagraphs } from './lib/docx.mjs';
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const BACKEND_ROOT = path.resolve(SCRIPT_DIR, '..');
 const REPO_ROOT = path.resolve(BACKEND_ROOT, '..');
-
-// ---------------------------------------------------------------------------
-// Release identity (master doc 3.5.1, 3.6.2 — one Work, many immutable Releases)
-// ---------------------------------------------------------------------------
 
 const RELEASE = {
   releaseId: 'REL-NONO-BRE-20260803-V1',
@@ -55,21 +30,11 @@ const DEFAULT_SOURCE = path.join(
 );
 const DEFAULT_OUT_DIR = path.join(BACKEND_ROOT, 'content', 'generated');
 
-// ---------------------------------------------------------------------------
-// Segmentation and classification configuration (no magic literals below this block)
-// ---------------------------------------------------------------------------
-
-/** Heading level that opens a protected component. */
 const COMPONENT_HEADING_LEVEL = 1;
-/** Heading level that opens a section-level child unit inside a chapter. */
 const SECTION_HEADING_LEVEL = 2;
-/** Heading level that may open an inset micro-story. */
 const MICROSTORY_HEADING_LEVEL = 3;
-/** A paragraph of at most this many words is breath-paced and joins a stanza. */
 const STANZA_MAX_WORDS = 12;
-/** A stanza needs at least this many consecutive breath lines; a lone line stays a paragraph. */
 const STANZA_MIN_LINES = 2;
-/** How far the epigraph matcher looks ahead for the `— One` signature. */
 const EPIGRAPH_MAX_PARAGRAPHS = 6;
 
 const MICROSTORY_TITLE_PATTERN = /^micro-?story\b/i;
@@ -81,17 +46,10 @@ const ATTRIBUTION_SUFFIX_PATTERN = /\s*[—–]\s*One\s*$/;
 const TERMINAL_COLON_PATTERN = /:\s*$/;
 const EPIGRAPH_ATTRIBUTION = '— One';
 
-/** Authored reader cues (master doc 3.4.2) — rendered as manuscript voice, not as UI chrome. */
 const CUE_PREFIXES = ['Turn the page.', 'Take a breath. Then turn the page.'];
 
-/** Section number readers: `Section 4 — …` (Chapters 0 and 1) and `4. …` (Chapter 00). */
 const SECTION_NUMBER_PATTERNS = [/^Section\s+(\d+)\b/i, /^(\d+)\s*[.)]/];
 
-/**
- * The LOCKED twelve protected components (master doc 3.5.2). Order must not change.
- * `expectedTitle` verifies the derived Heading1 spine; `canonicalTitle` is always taken
- * verbatim from the document itself (component 0 carries no heading of its own).
- */
 const COMPONENT_PLAN = [
   {
     componentIndex: 0,
@@ -232,17 +190,10 @@ const COMPONENT_PLAN = [
   },
 ];
 
-/**
- * [PROPOSED] initial editorial tagging for the v2.0 arc (master doc 3.6.3), subject to the
- * human-review gate. Everything here is build-time and human-governed; nothing is inferred
- * from a reader at runtime. Keys are unit ids so the tagging is auditable line by line.
- */
 const SECTION_METADATA = {
-  // Chapter 0 — recognition peak at §7, orientation hand-off at §8 ("Turn the page.").
   'CU-NONO-OA-003-S07': { contentRole: 'recognition', emotionalTone: 'reflective' },
   'CU-NONO-OA-003-S08': { contentRole: 'orientation', emotionalTone: 'clarifying' },
 
-  // Chapter 00 parts 2–7 — the operating-system exposure block.
   'CU-NONO-OA-004-S02': { isNoShareZone: true, requiresDecompressionAfter: true, isHighImpact: true, emotionalTone: 'grave' },
   'CU-NONO-OA-004-S03': { isNoShareZone: true, requiresDecompressionAfter: true, isHighImpact: true, emotionalTone: 'grave' },
   'CU-NONO-OA-004-S04': { isNoShareZone: true, requiresDecompressionAfter: true, isHighImpact: true, emotionalTone: 'grave' },
@@ -251,7 +202,6 @@ const SECTION_METADATA = {
   'CU-NONO-OA-004-S07': { isNoShareZone: true, requiresDecompressionAfter: true, isHighImpact: true, emotionalTone: 'grave' },
   'CU-NONO-OA-004-S09': { contentRole: 'invitation', emotionalTone: 'convergent' },
 
-  // Chapter 1 — witness sections 4/5/7 carry accounts of harm to children.
   'CU-NONO-OA-008-S01': { contentRole: 'recognition', emotionalTone: 'reflective' },
   'CU-NONO-OA-008-S04': { isNoShareZone: true, requiresDecompressionAfter: true, isHighImpact: true, emotionalTone: 'grave' },
   'CU-NONO-OA-008-S05': { isNoShareZone: true, requiresDecompressionAfter: true, isHighImpact: true, emotionalTone: 'grave' },
@@ -262,29 +212,11 @@ const SECTION_METADATA = {
 
 const DEFAULT_SECTION_CONTENT_ROLE = 'exposure';
 
-// ---------------------------------------------------------------------------
-// Small pure helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Count whitespace-delimited words. Applied to the SOURCE paragraph stream so totals
- * reconcile exactly with the Founder Review Control Sheet table (master doc 3.5.2).
- *
- * @param {string} text any text
- * @returns {number} word count
- */
 function countWords(text) {
   const trimmed = text.trim();
   return trimmed === '' ? 0 : trimmed.split(/\s+/).length;
 }
 
-/**
- * Normalize a heading for order verification only. Dash variants and case are collapsed so
- * the check survives encoding differences; the canonical title is never normalized.
- *
- * @param {string} text heading text
- * @returns {string} comparison key
- */
 function titleKey(text) {
   return text
     .replace(/[‐-―]/g, '-')
@@ -293,12 +225,6 @@ function titleKey(text) {
     .toUpperCase();
 }
 
-/**
- * Deterministic JSON with recursively sorted object keys — the hashing canon.
- *
- * @param {unknown} value any JSON-serializable value
- * @returns {string} canonical JSON text
- */
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value !== null && typeof value === 'object') {
@@ -310,72 +236,32 @@ function canonicalJson(value) {
   return JSON.stringify(value ?? null);
 }
 
-/**
- * @param {string} text content to digest
- * @returns {string} `sha256:<hex>`
- */
 function sha256(text) {
   return `sha256:${createHash('sha256').update(text, 'utf8').digest('hex')}`;
 }
 
-/**
- * @param {Buffer} buffer raw bytes to digest
- * @returns {string} `sha256:<hex>`
- */
 function sha256Bytes(buffer) {
   return `sha256:${createHash('sha256').update(buffer).digest('hex')}`;
 }
 
-/**
- * @param {import('./lib/docx.mjs').DocxLine[]} lines source lines
- * @returns {import('./lib/docx.mjs').DocxLine[]} deep copy safe to mutate
- */
 function cloneLines(lines) {
   return lines.map((line) => ({ runs: line.runs.map((run) => ({ ...run })) }));
 }
 
-/**
- * Flatten a paragraph's lines into a single run list (used by cue blocks).
- *
- * @param {import('./lib/docx.mjs').DocxParagraph} paragraph source paragraph
- * @returns {import('./lib/docx.mjs').DocxRun[]} runs
- */
 function flattenRuns(paragraph) {
   return cloneLines(paragraph.lines).flatMap((line) => line.runs);
 }
 
-// ---------------------------------------------------------------------------
-// Block classification (BUILD_CONTRACT 6)
-// ---------------------------------------------------------------------------
-
-/**
- * @param {import('./lib/docx.mjs').DocxParagraph} paragraph candidate
- * @returns {boolean} true when the paragraph is one of the authored reader cues
- */
 function isCue(paragraph) {
   return CUE_PREFIXES.some((prefix) => paragraph.text.trim().startsWith(prefix));
 }
 
-/**
- * A breath line is a short, single-thought line whose break is semantic
- * ("Quietly." / "Consistently." / "Relentlessly.").
- *
- * @param {import('./lib/docx.mjs').DocxParagraph} paragraph candidate
- * @returns {boolean} true when the paragraph may join a stanza
- */
 function isBreathParagraph(paragraph) {
   const lines = paragraph.text.split('\n');
   if (lines.some((line) => countWords(line) > STANZA_MAX_WORDS)) return false;
   return !TERMINAL_COLON_PATTERN.test(paragraph.text);
 }
 
-/**
- * Remove the trailing `— One` signature from the final line of an epigraph, keeping the
- * closing quotation mark. The signature is preserved as the block's `attribution`.
- *
- * @param {import('./lib/docx.mjs').DocxLine[]} lines epigraph lines (mutated)
- * @returns {void}
- */
 function stripAttribution(lines) {
   const last = lines[lines.length - 1];
   for (let index = last.runs.length - 1; index >= 0; index -= 1) {
@@ -389,14 +275,6 @@ function stripAttribution(lines) {
   last.runs = last.runs.filter((run) => run.text !== '');
 }
 
-/**
- * Try to read a One-voice epigraph starting at `start`: a quoted passage that closes with
- * the `— One` signature, either on the same paragraph or on a following one.
- *
- * @param {import('./lib/docx.mjs').DocxParagraph[]} paragraphs paragraph slice
- * @param {number} start index to test
- * @returns {{ block: object, nextIndex: number }|null} epigraph block, or null
- */
 function matchEpigraph(paragraphs, start) {
   const first = paragraphs[start];
   if (!OPEN_QUOTE_PATTERN.test(first.text.trim())) return null;
@@ -417,20 +295,11 @@ function matchEpigraph(paragraphs, start) {
         nextIndex: index + 1,
       };
     }
-    // The quotation closed without the signature — this is body text, not an epigraph.
     if (CLOSE_QUOTE_PATTERN.test(text)) return null;
   }
   return null;
 }
 
-/**
- * Find the end of a micro-story: the next heading at or above the opening heading's level.
- *
- * @param {import('./lib/docx.mjs').DocxParagraph[]} paragraphs paragraph slice
- * @param {number} start first index after the micro-story heading
- * @param {number} level the opening heading's level
- * @returns {number} exclusive end index
- */
 function findHeadingBoundary(paragraphs, start, level) {
   for (let index = start; index < paragraphs.length; index += 1) {
     if (paragraphs[index].level > 0 && paragraphs[index].level <= level) return index;
@@ -438,12 +307,6 @@ function findHeadingBoundary(paragraphs, start, level) {
   return paragraphs.length;
 }
 
-/**
- * Convert an ordered paragraph slice into `blocks[]` — the only renderable shapes.
- *
- * @param {import('./lib/docx.mjs').DocxParagraph[]} paragraphs paragraph slice
- * @returns {object[]} blocks
- */
 function classifyBlocks(paragraphs) {
   const blocks = [];
   let breathBuffer = [];
@@ -519,8 +382,6 @@ function classifyBlocks(paragraphs) {
 
     flushBreathBuffer();
     const lines = cloneLines(paragraph.lines);
-    // A multi-line paragraph keeps its authored breaks; `paragraph` has no `lines` field,
-    // so it degrades to a stanza rather than losing a semantic break.
     blocks.push(
       lines.length > 1 ? { type: 'stanza', lines } : { type: 'paragraph', runs: lines[0].runs },
     );
@@ -531,13 +392,6 @@ function classifyBlocks(paragraphs) {
   return blocks;
 }
 
-/**
- * Count blocks by type, descending into micro-stories.
- *
- * @param {object[]} blocks block list
- * @param {Record<string, number>} [into] accumulator
- * @returns {Record<string, number>} counts by block type
- */
 function countBlockTypes(blocks, into = {}) {
   for (const block of blocks) {
     into[block.type] = (into[block.type] ?? 0) + 1;
@@ -546,34 +400,14 @@ function countBlockTypes(blocks, into = {}) {
   return into;
 }
 
-// ---------------------------------------------------------------------------
-// Segmentation into the twelve protected components and their section children
-// ---------------------------------------------------------------------------
-
-/**
- * @param {number} componentIndex 0..11
- * @returns {string} `CU-NONO-OA-000` style id
- */
 function componentUnitId(componentIndex) {
   return `${UNIT_ID_PREFIX}-${String(componentIndex).padStart(3, '0')}`;
 }
 
-/**
- * @param {number} componentIndex 0..11
- * @param {number} sectionOrdinal 1-based position inside the component
- * @returns {string} `CU-NONO-OA-003-S01` style id
- */
 function sectionUnitId(componentIndex, sectionOrdinal) {
   return `${componentUnitId(componentIndex)}-S${String(sectionOrdinal).padStart(2, '0')}`;
 }
 
-/**
- * Read the authored section number out of a Heading2 string.
- *
- * @param {string} text heading text
- * @param {number} ordinal 1-based fallback
- * @returns {number} section number
- */
 function readSectionNumber(text, ordinal) {
   for (const pattern of SECTION_NUMBER_PATTERNS) {
     const match = text.trim().match(pattern);
@@ -582,12 +416,6 @@ function readSectionNumber(text, ordinal) {
   return ordinal;
 }
 
-/**
- * Split the paragraph stream on Heading1 boundaries — the twelve protected components.
- *
- * @param {import('./lib/docx.mjs').DocxParagraph[]} paragraphs whole document
- * @returns {{ start: number, end: number, heading: import('./lib/docx.mjs').DocxParagraph|null }[]} spans
- */
 function segmentComponents(paragraphs) {
   const headingIndexes = paragraphs
     .filter((paragraph) => paragraph.level === COMPONENT_HEADING_LEVEL)
@@ -601,20 +429,6 @@ function segmentComponents(paragraphs) {
   }));
 }
 
-/**
- * Split a component span on Heading2 boundaries — the section-level render units.
- *
- * The material *before* the first Heading2 is a section too. Chapter 0 opens with its heading
- * and a One-signature epigraph; Chapter 00 opens with a 136-word framing passage. If those
- * blocks belonged to the chapter alone, a reader walking the section-level spine (§3.4.2, "one
- * section-level unit renders at a time") would never see them — and silently dropping 190 words
- * of canonical text is a plainer violation of "the Opening Arc always remains untouched" than
- * rendering something twice would be. So an opening span is emitted whenever content precedes
- * the first section, and every authored block belongs to exactly one leaf.
- *
- * @param {import('./lib/docx.mjs').DocxParagraph[]} slice component paragraphs
- * @returns {{ start: number, end: number, heading: object|null, isOpening: boolean }[]} spans
- */
 function segmentSections(slice) {
   const starts = slice
     .map((paragraph, position) => (paragraph.level === SECTION_HEADING_LEVEL ? position : -1))
@@ -629,8 +443,6 @@ function segmentSections(slice) {
     isOpening: false,
   }));
 
-  // Anything above the first section heading — the chapter heading, its epigraph, any framing
-  // passage — becomes the chapter's opening unit.
   if (starts[0] > 0) {
     spans.unshift({ start: 0, end: starts[0], heading: null, isOpening: true });
   }
@@ -638,12 +450,6 @@ function segmentSections(slice) {
   return spans;
 }
 
-/**
- * Build every ManuscriptUnit for the release.
- *
- * @param {import('./lib/docx.mjs').DocxParagraph[]} paragraphs whole document
- * @returns {{ units: object[], problems: string[] }} units in reading order plus verification notes
- */
 function buildUnits(paragraphs) {
   const spans = segmentComponents(paragraphs);
   const problems = [];
@@ -689,8 +495,6 @@ function buildUnits(paragraphs) {
 
     let numberedSoFar = 0;
     const sections = sectionSpans.map((sectionSpan) => {
-      // The opening unit is ordinal 0 — `-S00` — so the numbered sections keep the ordinals a
-      // reader and an editor would both expect.
       const ordinal = sectionSpan.isOpening ? 0 : (numberedSoFar += 1);
       const sectionId = sectionUnitId(plan.componentIndex, ordinal);
       const overrides = SECTION_METADATA[sectionId] ?? {};
@@ -708,8 +512,6 @@ function buildUnits(paragraphs) {
           ? null
           : readSectionNumber(sectionSpan.heading.text, ordinal),
         sectionOrdinal: ordinal,
-        // The opening unit carries the chapter's own heading — it is where that heading is
-        // actually rendered, so the reader meets the chapter title exactly once.
         canonicalTitle: sectionSpan.isOpening ? authoredTitle : sectionSpan.heading.text,
         contentRole: overrides.contentRole ?? DEFAULT_SECTION_CONTENT_ROLE,
         emotionalTone: overrides.emotionalTone ?? plan.emotionalTone,
@@ -742,8 +544,6 @@ function buildUnits(paragraphs) {
       emotionalTone: plan.emotionalTone,
       wordCount,
       isOpeningArc: true,
-      // A component inherits protection from any child it contains: conservative by doctrine,
-      // because over-suppressing a share window is safe and under-suppressing is a violation.
       isHighImpact: sections.some((section) => section.isHighImpact),
       isNoShareZone: sections.some((section) => section.isNoShareZone),
       requiresDecompressionAfter: sections.some((section) => section.requiresDecompressionAfter),
@@ -769,16 +569,6 @@ function buildUnits(paragraphs) {
   return { units, problems };
 }
 
-// ---------------------------------------------------------------------------
-// Output
-// ---------------------------------------------------------------------------
-
-/**
- * Compose the full on-disk shape of one unit file.
- *
- * @param {object} unit assembled unit
- * @returns {object} unit document
- */
 function toUnitDocument(unit) {
   return {
     unitId: unit.unitId,
@@ -814,14 +604,6 @@ function toUnitDocument(unit) {
   };
 }
 
-/**
- * Compose the release manifest.
- *
- * @param {object[]} units units in reading order
- * @param {{ path: string, bytes: number, sha256: string }} source provenance of the .docx
- * @param {string} releaseId release identifier
- * @returns {object} release manifest document
- */
 function toReleaseDocument(units, source, releaseId) {
   const components = units.filter((unit) => unit.parentUnitId === null);
   const totalWordCount = components.reduce((total, unit) => total + unit.wordCount, 0);
@@ -872,14 +654,6 @@ function toReleaseDocument(units, source, releaseId) {
   };
 }
 
-/**
- * Write the release to disk, replacing any previously generated unit files.
- *
- * @param {string} outDir output directory
- * @param {object} release release manifest document
- * @param {object[]} units units in reading order
- * @returns {void}
- */
 function writeRelease(outDir, release, units) {
   const unitsDir = path.join(outDir, 'units');
   fs.mkdirSync(unitsDir, { recursive: true });
@@ -898,10 +672,6 @@ function writeRelease(outDir, release, units) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Reporting
-// ---------------------------------------------------------------------------
-
 const SUMMARY_COLUMNS = [
   { key: 'component', label: 'CMP', width: 4 },
   { key: 'unitId', label: 'UNIT ID', width: 20 },
@@ -912,21 +682,11 @@ const SUMMARY_COLUMNS = [
   { key: 'title', label: 'TITLE', width: 0 },
 ];
 
-/**
- * @param {string} value cell text
- * @param {number} width column width (0 = free)
- * @param {string} [align] `right` to right-align
- * @returns {string} padded cell
- */
 function cell(value, width, align) {
   if (width === 0) return value;
   return align === 'right' ? value.padStart(width) : value.padEnd(width);
 }
 
-/**
- * @param {Record<string, number>} counts block counts by type
- * @returns {string} compact summary, e.g. `heading 9, paragraph 41, stanza 12`
- */
 function formatBlockCounts(counts) {
   return Object.keys(counts)
     .sort()
@@ -934,12 +694,6 @@ function formatBlockCounts(counts) {
     .join(', ');
 }
 
-/**
- * Print the human verification table: locked sequence, word counts, block shapes.
- *
- * @param {object[]} units units in reading order
- * @returns {void}
- */
 function printSummary(units) {
   console.log(SUMMARY_COLUMNS.map((column) => cell(column.label, column.width)).join('  '));
   console.log(SUMMARY_COLUMNS.map((column) => cell('', column.width).replace(/ /g, '-')).join('  '));
@@ -961,12 +715,6 @@ function printSummary(units) {
   }
 }
 
-/**
- * Print protection tagging so the human-review gate has something to sign off on.
- *
- * @param {object[]} units units in reading order
- * @returns {void}
- */
 function printTagging(units) {
   console.log('\nProtection tagging (master doc 3.6.3 [PROPOSED], pending human-review gate):');
   for (const unit of units) {
@@ -980,14 +728,6 @@ function printTagging(units) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
-
-/**
- * @param {string[]} argv raw process arguments
- * @returns {{ source: string, outDir: string, releaseId: string, dryRun: boolean }} options
- */
 function parseArgs(argv) {
   const options = {
     source: DEFAULT_SOURCE,
@@ -1016,11 +756,6 @@ function parseArgs(argv) {
   return options;
 }
 
-/**
- * Entry point.
- *
- * @returns {void}
- */
 function main() {
   const options = parseArgs(process.argv.slice(2));
 

@@ -1,26 +1,3 @@
-/**
- * MongoDB `$jsonSchema` validators — the executable form of the anti-profiling rules.
- *
- * Every collection declares a **closed** property set (`additionalProperties: false`).
- * That is the mechanism, not a style choice: a field the platform has no business holding
- * — a birthdate, an IP address, a user-agent string, a coordinate pair — cannot be written
- * even by a bug, a misconfigured import, or a future contributor who did not read §9.5.
- * The privacy statement shown to readers ("It is not used to profile you") is therefore a
- * property of the database, not a promise in a document.
- *
- * Consequences the team must accept:
- *  - Adding a field to a collection means adding it here first.
- *  - `test/prohibited-data.test.js` walks {@link COLLECTION_VALIDATORS} and fails the build
- *    if any prohibited name is ever declared. No prohibited name appears in this file.
- *
- * Numeric fields accept `int`, `long` and `double` because the Node driver serialises a
- * plain JavaScript number as a double; a stricter declaration would reject correct writes.
- *
- * `required` is deliberately minimal (`_id` only). Completeness is enforced by the route
- * JSON Schemas and the services; this layer exists to enforce the *boundary* of what may
- * be stored at all.
- */
-
 import { COLLECTIONS } from './collections.js';
 import {
   ADMIN_ROLES,
@@ -55,10 +32,6 @@ import {
   WINDOW_TYPES,
 } from '../config/constants.js';
 
-/* -------------------------------------------------------------------------- */
-/* Fragment helpers                                                            */
-/* -------------------------------------------------------------------------- */
-
 const str = { bsonType: 'string' };
 const strOrNull = { bsonType: ['string', 'null'] };
 const date = { bsonType: 'date' };
@@ -76,13 +49,6 @@ const arrayOf = (items) => ({ bsonType: 'array', items });
 const stringArray = arrayOf(str);
 const numberArray = arrayOf(num);
 
-/**
- * A closed object fragment.
- *
- * @param {Record<string, object>} properties Declared properties.
- * @param {string[]} [required] Required property names.
- * @returns {object} The `$jsonSchema` object fragment.
- */
 const closed = (properties, required = []) => ({
   bsonType: 'object',
   additionalProperties: false,
@@ -97,7 +63,6 @@ const closedOrNull = (properties, required = []) => ({
   properties,
 });
 
-/** Every document carries these three stamps plus a ULID `_id`. */
 const STAMPS = {
   _id: str,
   createdAt: date,
@@ -105,18 +70,8 @@ const STAMPS = {
   schemaVersion: num,
 };
 
-/**
- * A whole-document schema with the universal stamps merged in.
- *
- * @param {Record<string, object>} properties Domain properties.
- * @returns {object} A `$jsonSchema` document fragment.
- */
 const documentSchema = (properties) =>
   closed({ ...STAMPS, ...properties }, ['_id']);
-
-/* -------------------------------------------------------------------------- */
-/* Shared sub-documents                                                        */
-/* -------------------------------------------------------------------------- */
 
 const NMI_RESULT = closedOrNull({
   transactionId: strOrNull,
@@ -148,7 +103,6 @@ const SHIPPING_ADDRESS = closedOrNull({
   country: str,
 });
 
-/** Commerce vocabularies. Kept local: the commerce module owns their semantics. */
 const DONATION_KINDS = ['digital_transcript_access', 'support_mission'];
 const DONATION_STATUSES = [
   'initiated',
@@ -195,10 +149,6 @@ const MANUSCRIPT_EDITIONS = [
 const COHORT_STATUSES = ['planned', 'inviting', 'active', 'closed'];
 const INTENSITY_LEVELS = ['low', 'medium', 'high'];
 
-/**
- * The union of every whitelisted event payload key. The events module filters per event
- * name before writing; this closes the door on anything the filter could ever miss.
- */
 const EVENT_PAYLOAD_PROPERTIES = (() => {
   const keys = new Set(EVENT_PAYLOAD_COMMON_FIELDS);
   for (const fields of Object.values(EVENT_PAYLOAD_FIELDS)) {
@@ -208,14 +158,9 @@ const EVENT_PAYLOAD_PROPERTIES = (() => {
   for (const key of keys) {
     properties[key] = { bsonType: ['string', 'int', 'long', 'double', 'bool', 'null'] };
   }
-  // `pathway` is the one payload value with a closed vocabulary.
   properties.pathway = enumOrNull(PATHWAYS);
   return properties;
 })();
-
-/* -------------------------------------------------------------------------- */
-/* Per-collection validators                                                   */
-/* -------------------------------------------------------------------------- */
 
 const manuscripts = documentSchema({
   title: str,
@@ -253,8 +198,6 @@ const manuscriptUnits = documentSchema({
   content_role: enumOrNull(CONTENT_ROLES),
   emotional_tone: enumOrNull(EMOTIONAL_TONES),
   canonicalText: strOrNull,
-  // The render contract (BUILD_CONTRACT §6). Block shapes are validated by the manuscript
-  // ingest pipeline; they are authored prose structures and carry no reader data.
   blocks: arrayOf(openObject),
   versions: closedOrNull({
     age_8_12: openObjectOrNull,
@@ -317,11 +260,6 @@ const resonanceNodes = documentSchema({
   }),
 });
 
-/**
- * The privacy-critical collection. It holds no name, no email, no account linkage, no
- * network identifier and no exact age — only the band, which exists to choose a rendering
- * and is overwritten, never appended to.
- */
 const readingSessions = documentSchema({
   tokenHash: str,
   ageBand: enumOrNull(AGE_BANDS),
@@ -391,8 +329,6 @@ const shareTokens = documentSchema({
   createdBySessionId: strOrNull,
   createdAtUnitId: strOrNull,
   promptId: strOrNull,
-  // Private operational counter. Never exposed to any reader-facing surface — rendering it
-  // would be a "share counter" (prohibited mechanic, §14.4.4).
   openCount: num,
   firstOpenedAt: dateOrNull,
   lastOpenedAt: dateOrNull,
@@ -412,7 +348,6 @@ const cohorts = documentSchema({
   notes: strOrNull,
 });
 
-/** Invitee PII lives here and is never copied into `reading_sessions` (§9.2.7). */
 const invitations = documentSchema({
   cohortId: strOrNull,
   code: str,
@@ -427,11 +362,6 @@ const invitations = documentSchema({
   redeemedAt: dateOrNull,
   welcomeEmailSentAt: dateOrNull,
   readingLinkSentAt: dateOrNull,
-  // Delivery state. `sendCount` is an internal operational counter — the prohibition on
-  // counters (§14.4.4) governs what a reader is shown, and nothing here is ever rendered to
-  // one. `lastError` holds a short reason for a failed send so a coordinator can retry the
-  // right addresses; it must never accumulate a server's full reply, which can quote an
-  // address (§9.10).
   sentAt: dateOrNull,
   sendCount: numOrNull,
   lastError: strOrNull,
@@ -440,13 +370,6 @@ const invitations = documentSchema({
   notes: strOrNull,
 });
 
-/**
- * Editable copy for the two Founding Reader messages.
- *
- * `_id` is the template key, not a ULID (see `db/collections.js`). No reader data of any
- * kind belongs here: a template is copy with placeholders, and the values that fill them
- * arrive at render time and are never stored.
- */
 const emailTemplates = closed(
   {
     _id: str,
@@ -462,15 +385,6 @@ const emailTemplates = closed(
   ['_id'],
 );
 
-/**
- * A beta test instrument. Questions are data, never code (§9.2.8), so the whole of what a
- * reader is asked lives in this document and a rewording is an editorial act.
- *
- * `sections` groups the questions a reader sees under headings the instrument supplies —
- * "Core questions", "Reviewer metadata" — without letting a heading become a question. A
- * question names the section it belongs to; a section it does not name simply renders it
- * with the rest, so an instrument that declares no sections still renders correctly.
- */
 const questionnaires = documentSchema({
   title: str,
   version: str,
@@ -488,9 +402,6 @@ const questionnaires = documentSchema({
       options: { bsonType: ['array', 'null'], items: str },
       required: bool,
       section: strOrNull,
-      // The instrument numbers and names each question ("3. Emotional movement: Did the
-      // sequence move you…"). The name is kept apart from the question so a reviewer's
-      // answer can be listed under a heading two words long instead of forty.
       label: strOrNull,
       scaleLegend: strOrNull,
       role: enumOrNull(QUESTION_ROLES),
@@ -498,20 +409,6 @@ const questionnaires = documentSchema({
   ),
 });
 
-/**
- * One returned instrument.
- *
- * The answer shape is flat and closed — `text`, `rating`, `values` — rather than one
- * polymorphic `value`. A compound question ("Rate 1–5 and explain") produces both a rating
- * and a paragraph, and storing that as a nested object would put research data in a shape no
- * aggregation can reach: the founder's question is "what did Q9 average", and that has to be
- * one indexed numeric field rather than something a reader has to unpack per document.
- *
- * `reviewer` is the instrument's own metadata block. It holds a reviewer code or a name the
- * reviewer chose to give, and `quoteConsent` — which is not decoration. Nothing from a
- * response may be quoted anywhere without it, so it travels with the answers rather than in
- * a spreadsheet beside them.
- */
 const questionnaireResponses = documentSchema({
   questionnaireId: str,
   invitationId: strOrNull,
@@ -535,24 +432,7 @@ const questionnaireResponses = documentSchema({
   completedAt: dateOrNull,
 });
 
-/**
- * Free-form reader feedback, optionally anchored to passages the reader marked while
- * reading (§3.4.2). Three absences are the point of this shape:
- *
- *  - **No age.** No band, no layer, no birthdate, no gender. §14.4.3 forbids the profiling
- *    and §9.2 keeps the band session-only; a band declared here would sit one field away
- *    from an email address, which is the join the privacy wall exists to prevent.
- *  - **No network identity.** No address, no agent string, no device identifier. The
- *    submission is attributable to a severable session and to nothing else.
- *  - **No reading trail.** The passages a reader chose to comment on are here; where they
- *    scrolled, how long they took, and what they completed are not.
- *
- * `email` is present only when `contactConsent` is true — the service refuses to write one
- * otherwise, so an address cannot exist here without the reader having asked to be reached.
- */
 const feedback = documentSchema({
-  // Severable: `DELETE /sessions/current` nulls it, and the feedback survives as anonymous
-  // research material rather than being destroyed with the reader's session.
   sessionId: strOrNull,
   kind: enumOf(FEEDBACK_KINDS),
   category: enumOf(FEEDBACK_CATEGORIES),
@@ -598,8 +478,6 @@ const donations = documentSchema({
 
 const orders = documentSchema({
   orderNumber: strOrNull,
-  // `type` is canonical (§6.9). `mode` is the §9.2.9 alias and is accepted for
-  // compatibility; services write `type`.
   type: enumOf(ORDER_TYPES),
   mode: enumOrNull(['purchase', 'reserve']),
   productSku: strOrNull,
@@ -631,8 +509,6 @@ const products = documentSchema({
   title: strOrNull,
   edition: strOrNull,
   description: strOrNull,
-  // No price exists anywhere in the corpus. The field ships null and the purchase flow
-  // cannot activate until the founder sets it (§6.10).
   priceCents: numOrNull,
   currency: str,
   status: enumOf(PRODUCT_STATUSES),
@@ -653,7 +529,6 @@ const digitalAccessGrants = documentSchema({
   accessCount: numOrNull,
 });
 
-/** Gateway audit trail. Brand and last four digits only — never a PAN, expiry or CVV. */
 const paymentTransactions = documentSchema({
   gateway: enumOf(['nmi']),
   gatewayTransactionId: str,
@@ -672,11 +547,6 @@ const paymentTransactions = documentSchema({
   idempotencyKey: strOrNull,
 });
 
-/**
- * `payload` is the raw gateway event **after redaction**. The webhook module must strip
- * every card field and every network identifier before the document reaches this
- * collection; the schema cannot close a shape the gateway defines.
- */
 const nmiWebhookEvents = documentSchema({
   gatewayEventId: str,
   eventType: str,
@@ -688,10 +558,6 @@ const nmiWebhookEvents = documentSchema({
   error: strOrNull,
 });
 
-/**
- * "Become Family." records. The collection name is internal; every reader-facing string on
- * this pathway is the locked threshold phrase.
- */
 const familyMembers = documentSchema({
   email: str,
   displayName: strOrNull,
@@ -755,11 +621,6 @@ const auditLog = documentSchema({
   at: date,
 });
 
-/* -------------------------------------------------------------------------- */
-/* Registry                                                                    */
-/* -------------------------------------------------------------------------- */
-
-/** Collection name → `$jsonSchema` validator. */
 export const COLLECTION_VALIDATORS = Object.freeze({
   [COLLECTIONS.MANUSCRIPTS]: { $jsonSchema: manuscripts },
   [COLLECTIONS.MANUSCRIPT_UNITS]: { $jsonSchema: manuscriptUnits },
@@ -789,12 +650,6 @@ export const COLLECTION_VALIDATORS = Object.freeze({
 export const VALIDATION_LEVEL = 'strict';
 export const VALIDATION_ACTION = 'error';
 
-/**
- * Every property name declared anywhere in a validator, recursively.
- *
- * @param {object} [validators] Defaults to {@link COLLECTION_VALIDATORS}.
- * @returns {Map<string, Set<string>>} Collection name → declared field names.
- */
 export function declaredFieldNames(validators = COLLECTION_VALIDATORS) {
   const result = new Map();
   const walk = (node, sink) => {
@@ -819,12 +674,6 @@ export function declaredFieldNames(validators = COLLECTION_VALIDATORS) {
   return result;
 }
 
-/**
- * The executable anti-profiling assertion (§9.5.7). Called on boot and by CI.
- *
- * @param {object} [validators] Defaults to {@link COLLECTION_VALIDATORS}.
- * @throws {Error} When a prohibited field name is declared anywhere.
- */
 export function assertNoProhibitedFields(validators = COLLECTION_VALIDATORS) {
   const prohibited = new Set(PROHIBITED_FIELDS.map((field) => field.toLowerCase()));
   const offences = [];
@@ -843,13 +692,6 @@ export function assertNoProhibitedFields(validators = COLLECTION_VALIDATORS) {
   }
 }
 
-/**
- * Apply every validator to the database, creating collections that do not yet exist.
- *
- * @param {import('mongodb').Db} db An open database handle.
- * @param {{ logger?: { info: Function, warn: Function } }} [options] Optional logger.
- * @returns {Promise<{ applied: number, failures: string[] }>} Summary.
- */
 export async function applyValidators(db, options = {}) {
   const { logger } = options;
   assertNoProhibitedFields();

@@ -1,11 +1,3 @@
-/**
- * The canonical event catalog is a closed vocabulary.
- *
- * §9.2.5, binding: "these 11 events govern; the earlier 061226 taxonomy is superseded — never
- * run a second vocabulary." A drifting event name is not a cosmetic problem: the admin funnel
- * (§10.4) is computed from these names, and a renamed event silently zeroes a metric.
- */
-
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -17,7 +9,6 @@ import {
   allowedPayloadFields,
 } from '../src/config/constants.js';
 
-/** The eleven canonical events from the Phase 1 State Machine Specification, in order. */
 const CANONICAL_ELEVEN = [
   'LandingStarted',
   'LogoManifestationStarted',
@@ -39,7 +30,6 @@ test('the catalog is exactly the eleven canonical events plus ShareTokenOpened',
     assert.ok(names.includes(canonical), `missing canonical event "${canonical}"`);
   }
 
-  // The twelfth is [PROPOSED]: arrival via a share link, receiver side.
   assert.ok(names.includes('ShareTokenOpened'), 'ShareTokenOpened is the proposed twelfth event');
 
   assert.equal(
@@ -50,7 +40,6 @@ test('the catalog is exactly the eleven canonical events plus ShareTokenOpened',
 });
 
 test('no event name from the superseded 061226 taxonomy has crept back in', () => {
-  // Running two vocabularies at once is the specific failure §9.2.5 forbids.
   const superseded = [
     'threshold_viewed',
     'spark_started',
@@ -83,7 +72,6 @@ test('every event declares a payload whitelist', () => {
 });
 
 test('payload whitelists match the contract field-for-field', () => {
-  // BUILD_CONTRACT §3.
   const expected = {
     LandingStarted: [
       'entryPath',
@@ -121,7 +109,6 @@ test('payload whitelists match the contract field-for-field', () => {
 });
 
 test('no payload may carry the age band, an address, or an agent string', () => {
-  // §14.2, binding: "ageRange is session state only and MUST NOT appear in any event payload."
   const forbidden = [
     'ageRange',
     'ageBand',
@@ -149,7 +136,6 @@ test('no payload may carry the age band, an address, or an agent string', () => 
 });
 
 test('referrerDomain is a domain, not a URL', () => {
-  // A full referrer URL can carry an opaque share token in its path. Only the domain is kept.
   const landing = allowedPayloadFields('LandingStarted');
   assert.ok(landing.includes('referrerDomain'));
   assert.ok(!landing.includes('referrer'));
@@ -175,7 +161,5 @@ test('PathwaySelected carries exactly the seven canonical pathway slugs', () => 
 });
 
 test('the batch limit is bounded', () => {
-  // §9.3.1: batches of at most 20. Unbounded batches turn a fire-and-forget write path into a
-  // denial-of-service surface.
   assert.equal(EVENT_BATCH_LIMIT, 20);
 });

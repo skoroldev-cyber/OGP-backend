@@ -1,26 +1,9 @@
-/**
- * DOCX reading helpers for the manuscript ingestion pipeline.
- *
- * A .docx is a ZIP container. The governing display text lives in `word/document.xml`.
- * Extraction is done twice-over for reproducibility on any host:
- *   1. a dependency-free ZIP reader built on `node:zlib.inflateRawSync` (primary), and
- *   2. PowerShell `Expand-Archive` (fallback, Windows hosts).
- *
- * The parser preserves everything the Reading Room needs and nothing it does not:
- * paragraph style (Heading1/2/3), bold runs, italic runs, intra-paragraph line breaks,
- * tabs, and XML entity decoding. Formatting that carries no manuscript meaning
- * (justification, spacing, fonts, colors, rsid bookkeeping) is discarded.
- *
- * @module scripts/lib/docx
- */
-
 import { execFileSync } from 'node:child_process';
 import { inflateRawSync } from 'node:zlib';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-/** Path of the main document part inside a .docx container. */
 export const DOCUMENT_PART = 'word/document.xml';
 
 const SIG_END_OF_CENTRAL_DIRECTORY = 0x06054b50;
@@ -38,13 +21,6 @@ const XML_NAMED_ENTITIES = {
   apos: "'",
 };
 
-/**
- * Decode the XML entities OOXML actually emits, ampersand last so that
- * escaped escapes (`&amp;lt;`) survive as literal text.
- *
- * @param {string} value raw XML character data
- * @returns {string} decoded text
- */
 export function decodeXmlEntities(value) {
   return value
     .replace(/&(lt|gt|quot|apos);/g, (_match, name) => XML_NAMED_ENTITIES[name])
@@ -53,12 +29,6 @@ export function decodeXmlEntities(value) {
     .replace(/&amp;/g, '&');
 }
 
-/**
- * Locate the End Of Central Directory record by scanning backwards from EOF.
- *
- * @param {Buffer} buffer whole ZIP file
- * @returns {number} byte offset of the EOCD signature
- */
 function findEndOfCentralDirectory(buffer) {
   const floor = Math.max(0, buffer.length - END_OF_CENTRAL_DIRECTORY_SIZE - MAX_ZIP_COMMENT_SIZE);
   for (let offset = buffer.length - END_OF_CENTRAL_DIRECTORY_SIZE; offset >= floor; offset -= 1) {
@@ -67,12 +37,6 @@ function findEndOfCentralDirectory(buffer) {
   throw new Error('Not a ZIP container: end of central directory record not found.');
 }
 
-/**
- * Read the ZIP central directory.
- *
- * @param {Buffer} buffer whole ZIP file
- * @returns {Array<{ name: string, method: number, compressedSize: number, uncompressedSize: number, localHeaderOffset: number }>} entries
- */
 function readCentralDirectory(buffer) {
   const eocd = findEndOfCentralDirectory(buffer);
   const entryCount = buffer.readUInt16LE(eocd + 10);
@@ -99,13 +63,6 @@ function readCentralDirectory(buffer) {
   return entries;
 }
 
-/**
- * Read one entry out of a ZIP container without any third-party dependency.
- *
- * @param {Buffer} buffer whole ZIP file
- * @param {string} entryName container-relative path, e.g. `word/document.xml`
- * @returns {Buffer} the inflated entry bytes
- */
 export function readZipEntry(buffer, entryName) {
   const entry = readCentralDirectory(buffer).find((candidate) => candidate.name === entryName);
   if (!entry) throw new Error(`ZIP entry not found: ${entryName}`);
@@ -124,13 +81,6 @@ export function readZipEntry(buffer, entryName) {
   throw new Error(`Unsupported ZIP compression method ${entry.method} for ${entryName}.`);
 }
 
-/**
- * Windows fallback: copy the .docx to a temporary .zip and let PowerShell expand it.
- *
- * @param {string} docxPath absolute path to the .docx
- * @param {string} entryName container-relative path to read back
- * @returns {Buffer} the extracted entry bytes
- */
 function readEntryViaPowerShell(docxPath, entryName) {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ogp-docx-'));
   try {
@@ -153,13 +103,6 @@ function readEntryViaPowerShell(docxPath, entryName) {
   }
 }
 
-/**
- * Extract `word/document.xml` from a .docx.
- *
- * @param {string} docxPath absolute path to the .docx
- * @param {{ part?: string }} [options] optional container part override
- * @returns {{ xml: string, method: 'zlib'|'powershell', sourceBytes: number }} extraction result
- */
 export function extractDocumentXml(docxPath, options = {}) {
   const part = options.part ?? DOCUMENT_PART;
   const container = fs.readFileSync(docxPath);
@@ -198,21 +141,6 @@ const RUN_CONTENT_PATTERN =
 const LOOSE_BREAK_PATTERN = /<w:br\b[^>]*\/?>/g;
 const PAGE_OR_COLUMN_BREAK_PATTERN = /w:type="(?:page|column)"/;
 
-/**
- * @typedef {{ text: string, bold: boolean, italic: boolean }} DocxRun
- * @typedef {{ runs: DocxRun[] }} DocxLine
- * @typedef {{ index: number, styleId: string, level: number, lines: DocxLine[], text: string, isEmpty: boolean }} DocxParagraph
- */
-
-/**
- * Append a run to a line, merging into the previous run when formatting matches.
- *
- * @param {DocxLine} line target line
- * @param {string} text run text
- * @param {boolean} bold bold flag
- * @param {boolean} italic italic flag
- * @returns {void}
- */
 function pushRun(line, text, bold, italic) {
   if (text === '') return;
   const previous = line.runs[line.runs.length - 1];
@@ -223,13 +151,6 @@ function pushRun(line, text, bold, italic) {
   line.runs.push({ text, bold, italic });
 }
 
-/**
- * Trim the outer whitespace of a line without disturbing interior spacing,
- * then drop runs emptied by the trim.
- *
- * @param {DocxLine} line line to normalize
- * @returns {DocxLine} the same line, normalized
- */
 function trimLineEdges(line) {
   if (line.runs.length > 0) {
     line.runs[0].text = line.runs[0].text.replace(/^\s+/, '');
@@ -239,13 +160,6 @@ function trimLineEdges(line) {
   return line;
 }
 
-/**
- * Parse one `<w:p>` element into lines of formatted runs.
- *
- * @param {string} paragraphXml the paragraph element source
- * @param {number} index zero-based paragraph position in the body
- * @returns {DocxParagraph} parsed paragraph
- */
 function parseParagraph(paragraphXml, index) {
   const propertiesMatch = paragraphXml.match(PARAGRAPH_PROPERTIES_PATTERN);
   const properties = propertiesMatch ? propertiesMatch[0] : '';
@@ -260,12 +174,6 @@ function parseParagraph(paragraphXml, index) {
 
   const lines = [{ runs: [] }];
 
-  /**
-   * Consume the text, breaks and tabs of a single `<w:r>` element.
-   *
-   * @param {string} runXml the run element source
-   * @returns {void}
-   */
   const consumeRun = (runXml) => {
     const runProperties = runXml.match(RUN_PROPERTIES_PATTERN);
     const bold = runProperties ? BOLD_PATTERN.test(runProperties[0]) : false;
@@ -290,12 +198,6 @@ function parseParagraph(paragraphXml, index) {
     }
   };
 
-  /**
-   * Consume markup that sits between runs; only bare line breaks matter there.
-   *
-   * @param {string} gapXml source between two run elements
-   * @returns {void}
-   */
   const consumeGap = (gapXml) => {
     LOOSE_BREAK_PATTERN.lastIndex = 0;
     let token;
@@ -316,7 +218,6 @@ function parseParagraph(paragraphXml, index) {
 
   const normalized = lines.map(trimLineEdges).filter((line, position, all) => {
     if (line.runs.length > 0) return true;
-    // Keep interior blank lines (authored breathing space); drop leading/trailing ones.
     return position > 0 && position < all.length - 1;
   });
   const finalLines = normalized.length > 0 ? normalized : [{ runs: [] }];
@@ -332,12 +233,6 @@ function parseParagraph(paragraphXml, index) {
   };
 }
 
-/**
- * Parse the whole document body into an ordered paragraph stream.
- *
- * @param {string} xml contents of `word/document.xml`
- * @returns {DocxParagraph[]} paragraphs in authored order
- */
 export function parseParagraphs(xml) {
   const bodyStart = xml.indexOf('<w:body>');
   if (bodyStart === -1) throw new Error('Malformed document.xml: <w:body> not found.');

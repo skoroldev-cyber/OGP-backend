@@ -1,40 +1,3 @@
-/**
- * The product purchase workflow — workflow B (pathway 3).
- *
- * > "Digital transcript access uses a donation workflow. Hardcover editions use a product
- * > purchase workflow. These remain separate throughout the platform."
- *
- * Nothing in this file touches `donations`, the contribution receipt series, or the
- * transcript grant. An order is never a donation with a fulfilment flag, and no request
- * handled here can add a contribution to a purchase (§6.4).
- *
- * ## Reserve, or buy — never both at once
- *
- * Hardcover production is not complete at Phase 1 launch, so the pathway is *Purchase /
- * Reserve*:
- *
- *   - **Reserve** takes an address for a message and a quantity. No payment, no deposit,
- *     no card, no vault entry. Charging for an unproduced book creates a liability the
- *     corpus never authorised, and the confirmation says in plain words that nothing has
- *     been charged.
- *   - **Purchase** is built now and gated behind `HARDCOVER_PURCHASABLE`, and it cannot
- *     activate while `products.priceCents` is null — the gate lives in `products.js` and
- *     this service asks it rather than deciding for itself.
- *
- * ## State machine (§6.7)
- *
- *   reservations  `reserved → notified → converted | canceled`
- *   purchases     `created → paid → fulfillment_hold → shipped → delivered`
- *   any state     `→ canceled | refunded | partially_refunded`
- *
- * ## Copy
- *
- * Every string this module can send a human is written here and linted by the mailer before
- * it leaves the process. None of it contains a deadline, a stock claim, a countdown or an
- * encouragement to hurry: `fulfillment_hold` states the wait honestly, because "limited
- * time" and its relatives are prohibited outright.
- */
-
 import { SCHEMA_VERSION } from '../../config/constants.js';
 import { COLLECTIONS, creationStamps, updateStamps } from '../../db/collections.js';
 import { AUDIT_ACTIONS, writeAuditSafe } from '../../lib/audit.js';
@@ -47,7 +10,6 @@ import { recordPaymentTransaction, toNmiResult } from './donations.js';
 import { MERCHANT, RECEIPT_SERIES, assignReceiptNumber } from './grants.js';
 import { createProductsService } from './products.js';
 
-/** Forward-only lifecycle ranking. A record never moves backwards (§6.7, §9.6). */
 export const ORDER_STATE_RANK = Object.freeze({
   created: 1,
   pending: 1,
@@ -68,13 +30,6 @@ const GATEWAY_UNAVAILABLE_MESSAGE =
 
 const ORDER_DESCRIPTION = 'One Global People printed edition';
 
-/**
- * The reservation confirmation. It states the one fact a reserver most needs — that no
- * money has moved — before anything else, and promises exactly one future message.
- *
- * @param {{ orderNumber: string, quantity: number, title: string }} input Reservation facts.
- * @returns {{ subject: string, text: string }} The message.
- */
 export function reservationConfirmation({ orderNumber, quantity, title }) {
   return {
     subject: `Your hardcover reservation — ${MERCHANT.name}`,
@@ -95,12 +50,6 @@ export function reservationConfirmation({ orderNumber, quantity, title }) {
   };
 }
 
-/**
- * The single notification a reservation may ever produce.
- *
- * @param {{ orderNumber: string, title: string, purchaseUrl: string }} input Facts.
- * @returns {{ subject: string, text: string }} The message.
- */
 export function reservationReadyNotice({ orderNumber, title, purchaseUrl }) {
   return {
     subject: `The printed edition is ready — ${MERCHANT.name}`,
@@ -120,13 +69,6 @@ export function reservationReadyNotice({ orderNumber, title, purchaseUrl }) {
   };
 }
 
-/**
- * Split a single-field name for the gateway's AVS fields. Imperfect by nature, which is why
- * the address itself carries the authoritative value and this is only a courtesy split.
- *
- * @param {string|null|undefined} name The address name.
- * @returns {{ firstName: string|undefined, lastName: string|undefined }} Name parts.
- */
 function splitName(name) {
   if (typeof name !== 'string' || name.trim() === '') {
     return { firstName: undefined, lastName: undefined };
@@ -136,11 +78,6 @@ function splitName(name) {
   return { firstName: parts.slice(0, -1).join(' '), lastName: parts[parts.length - 1] };
 }
 
-/**
- * @param {{ db: import('mongodb').Db, config: object, logger?: object, mailer?: object,
- *           nmi?: object, products?: object }} deps Dependencies.
- * @returns {object} The orders service.
- */
 export function createOrdersService({
   db,
   config,
@@ -154,11 +91,6 @@ export function createOrdersService({
   const mail = mailer ?? createMailer({ logger });
   const catalog = products ?? createProductsService({ db, config });
 
-  /**
-   * @param {{ subject: string, text: string }} message A rendered message.
-   * @param {string} to Recipient address.
-   * @returns {Promise<void>} Always resolves.
-   */
   async function sendQuietly(message, to) {
     try {
       await mail.send({ to, subject: message.subject, text: message.text });
@@ -167,21 +99,10 @@ export function createOrdersService({
     }
   }
 
-  /**
-   * @param {object} product A catalog document.
-   * @returns {string} The human title of the edition.
-   */
   function titleOf(product) {
     return product.title ?? product.name ?? product.sku;
   }
 
-  /**
-   * Present an order that already exists under this idempotency key, rather than taking a
-   * second payment (§6.14).
-   *
-   * @param {object} existing The stored order.
-   * @returns {Promise<object|{ declined: true, reason: string }>} The outcome.
-   */
   async function resume(existing) {
     if (existing.status === 'paid' || ORDER_STATE_RANK[existing.status] >= ORDER_STATE_RANK.paid) {
       return {
@@ -202,17 +123,7 @@ export function createOrdersService({
   }
 
   return {
-    /**
-     * `POST /commerce/orders`.
-     *
-     * @param {object|null} session The authenticated session, or null.
-     * @param {object} input The validated request body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<object|{ declined: true, reason: string }>} The outcome.
-     */
     async createPurchase(session, input, options = {}) {
-      // Both gates — the flag and the price — live in the catalog service, which refuses
-      // with the same calm 403 whichever one is closed.
       const product = await catalog.resolveForPurchase(input.productSku);
 
       const now = new Date();
@@ -282,8 +193,6 @@ export function createOrdersService({
           idempotencyKey: order.idempotencyKey,
           currency: order.currency,
           orderDescription: ORDER_DESCRIPTION,
-          // AVS is requested on a purchase because an address is present anyway. §6.5.3
-          // forbids collecting one on a contribution purely to enable it.
           billingAddress: {
             firstName,
             lastName,
@@ -334,8 +243,6 @@ export function createOrdersService({
             status: 'paid',
             paidAt,
             nmi: nmiResult,
-            // One S-series number serves as both the order number and the receipt number;
-            // §6.12 defines a single sales series, so minting a second would interleave it.
             receiptNumber: orderNumber,
             ...updateStamps(paidAt),
           },
@@ -406,14 +313,6 @@ export function createOrdersService({
       };
     },
 
-    /**
-     * `POST /commerce/reservations`. Email and quantity only.
-     *
-     * @param {object|null} session The authenticated session, or null.
-     * @param {object} input The validated request body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ reservationId: string, status: 'reserved' }>} The reservation.
-     */
     async createReservation(session, input, options = {}) {
       const product = await catalog.resolveForReservation(input.productSku);
 
@@ -426,7 +325,6 @@ export function createOrdersService({
         productSku: product.sku,
         productId: product._id,
         quantity: input.quantity,
-        // Null, not zero. A reservation has no amount at all; a zero would read as a price.
         amountCents: null,
         currency: product.currency ?? 'USD',
         email: input.email.trim().toLowerCase(),
@@ -487,21 +385,6 @@ export function createOrdersService({
       return { reservationId: reservation._id, status: 'reserved' };
     },
 
-    /**
-     * Send the one message a reservation produces, and move `reserved → notified`.
-     *
-     * The guard is the filter, not a branch: only a reservation that is still `reserved`
-     * and has never been notified can be selected, so a second call — a retry, a duplicated
-     * job, a second administrator — sends nothing. A drip sequence is not merely against
-     * policy here; it is unreachable.
-     *
-     * No route exposes this in Phase 1. Notifying reservations is a founder-run step taken
-     * once, when the edition becomes purchasable (§6.7), and the transition exists so that
-     * step cannot become a campaign.
-     *
-     * @param {string} orderId The reservation identifier.
-     * @returns {Promise<boolean>} True when this call sent the message.
-     */
     async notifyReservation(orderId) {
       const now = new Date();
       const reservation = await orders.findOneAndUpdate(

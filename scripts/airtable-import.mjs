@@ -1,24 +1,4 @@
 #!/usr/bin/env node
-/**
- * Import Founding Reader interest from the interim intake.
- *
- * §5 calls the current process the "Simple Solution for Now": LinkedIn to
- * foundingbetareaders@oneglobalpeople.org to Airtable to a private reading link. Airtable
- * exports CSV, so this reads CSV, and it is a one-time bridge rather than an integration —
- * when the beta dashboard exists, this script retires.
- *
- * The privacy wall is structural and this script is where it is first built (§9.2.7):
- * `invitations` holds the contact details, `reading_sessions` holds none, and the only join
- * between them is `redeemedBySessionId`, which exists for completion tracking and nothing else.
- * No column in a spreadsheet may become a profiling field, so every incoming key is checked
- * against PROHIBITED_FIELDS before anything is written.
- *
- * Usage:
- *   node scripts/airtable-import.mjs --file=interest.csv --cohort=cohort_one [--dry-run]
- *
- * @module scripts/airtable-import
- */
-
 import fs from 'node:fs';
 import process from 'node:process';
 
@@ -60,20 +40,6 @@ if (!file) fail('--file=<path.csv> is required.');
 if (!cohortId) fail('--cohort=<cohortId> is required.');
 if (!fs.existsSync(file)) fail(`No such file: ${file}`);
 
-/* -------------------------------------------------------------------------- */
-/* CSV                                                                         */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Parse RFC 4180 CSV.
- *
- * Written out rather than pulled in: an Airtable export routinely contains commas inside
- * quoted notes, newlines inside quoted notes, and doubled quotes, and a naive `split(',')`
- * silently corrupts exactly the rows a human took the trouble to write.
- *
- * @param {string} text The file contents.
- * @returns {string[][]} Rows of cells.
- */
 export function parseCsv(text) {
   const rows = [];
   let row = [];
@@ -81,7 +47,6 @@ export function parseCsv(text) {
   let quoted = false;
   let index = 0;
 
-  // A UTF-8 BOM would otherwise become part of the first header name.
   const source = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 
   while (index < source.length) {
@@ -142,10 +107,8 @@ export function parseCsv(text) {
   return rows.filter((cells) => cells.some((value) => value.trim() !== ''));
 }
 
-/** Normalise a header for matching: lowercase, alphanumerics only. */
 const normaliseHeader = (header) => header.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-/** Recognised columns, by normalised header. */
 const COLUMN_MAP = {
   email: 'email',
   emailaddress: 'email',
@@ -167,8 +130,6 @@ if (rows.length < 2) fail('The CSV has no data rows.');
 
 const headers = rows[0].map(normaliseHeader);
 
-// A spreadsheet column named `gender` or `birthdate` is not dropped quietly — it aborts. If
-// someone has been collecting it, that is worth knowing before it reaches a database.
 const prohibited = headers.filter((header) =>
   PROHIBITED_FIELDS.some((field) => normaliseHeader(field) === header),
 );
@@ -241,8 +202,6 @@ try {
     await invitations.insertOne({
       _id: newId(),
       cohortId,
-      // The private reading link is possession-based and single-use. It is never emailed as an
-      // attachment — §14.4.5 forbids sending the manuscript as a file.
       code: opaqueToken(),
       email,
       displayName: record.displayName ?? null,

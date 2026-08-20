@@ -1,35 +1,16 @@
-/**
- * Resonance map administration.
- *
- * Resonance scoring is **build-time and human-governed**. Every score in this collection is
- * authored by an editor and validated by a second person; nothing here is inferred from a
- * reader, and no runtime signal ever writes to it. That is the whole point of the design:
- * reader-state signals exist to *suppress* prompts, never to target, and a scoring model
- * that learned from behaviour would quietly become the targeting engine §14.4.3 forbids.
- *
- * Validation is what makes a node usable — `sessions/service.js` and `sharing/service.js`
- * only ever read nodes whose `qa_status.validated` is true. So `POST /:id/validate` is the
- * moment a human takes responsibility for a sharing window opening, and it is recorded as
- * such in the audit trail with the validator's own identifier.
- */
-
 import { SCHEMA_VERSION } from '../../config/constants.js';
 import { COLLECTIONS, creationStamps, updateStamps } from '../../db/collections.js';
 import { AUDIT_ACTIONS, writeAudit } from '../../lib/audit.js';
 import { newId } from '../../lib/ids.js';
+import { toFlag, toPaging } from '../../lib/schemas.js';
 import { ApiError } from '../../plugins/errors.js';
 import { toInteger, toIso } from './schemas.js';
 
-/** Audit actions this module writes that `lib/audit.js` does not already name. */
 export const RESONANCE_AUDIT_ACTIONS = Object.freeze({
   CREATE: 'resonance_node.create',
   UPDATE: 'resonance_node.update',
 });
 
-/**
- * @param {object} document A `resonance_nodes` document.
- * @returns {object} The dashboard projection.
- */
 export function toResonanceNodeResponse(document) {
   return {
     id: document._id,
@@ -48,19 +29,10 @@ export function toResonanceNodeResponse(document) {
   };
 }
 
-/**
- * @param {{ db: import('mongodb').Db, logger?: object }} deps Dependencies.
- * @returns {object} The admin resonance service.
- */
 export function createAdminResonanceService({ db, logger = null }) {
   const nodes = db.collection(COLLECTIONS.RESONANCE_NODES);
   const units = db.collection(COLLECTIONS.MANUSCRIPT_UNITS);
 
-  /**
-   * @param {string} id A node `_id`.
-   * @returns {Promise<object>} The node.
-   * @throws {ApiError} 404 when it does not exist.
-   */
   async function requireNode(id) {
     const node = await nodes.findOne({ _id: id });
     if (!node) throw new ApiError(404, 'NOT_FOUND', 'That resonance node does not exist.');
@@ -68,17 +40,13 @@ export function createAdminResonanceService({ db, logger = null }) {
   }
 
   return {
-    /**
-     * @param {object} query The validated query string.
-     * @returns {Promise<{ nodes: object[], total: number }>} The listing.
-     */
     async list(query = {}) {
       const filter = {};
       if (query.manuscriptUnitId) filter.manuscript_unit_id = query.manuscriptUnitId;
       if (query.nodeType) filter.node_type = query.nodeType;
-      if (typeof query.validated === 'boolean') filter['qa_status.validated'] = query.validated;
-      const limit = query.limit ?? 50;
-      const skip = query.offset ?? 0;
+      const validated = toFlag(query.validated);
+      if (validated !== undefined) filter['qa_status.validated'] = validated;
+      const { limit, skip } = toPaging(query);
       const [documents, count] = await Promise.all([
         nodes.find(filter, { sort: { node_id: 1 }, limit, skip }).toArray(),
         nodes.countDocuments(filter),
@@ -86,14 +54,7 @@ export function createAdminResonanceService({ db, logger = null }) {
       return { nodes: documents.map(toResonanceNodeResponse), total: count };
     },
 
-    /**
-     * @param {object} admin The acting administrator.
-     * @param {object} input The validated body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ node: object }>} The created node.
-     */
     async create(admin, input, options = {}) {
-      // A node that points at nothing would silently never fire; refuse it at the door.
       const unit = await units.findOne(
         { unitId: input.manuscriptUnitId },
         { projection: { _id: 1 } },
@@ -112,7 +73,6 @@ export function createAdminResonanceService({ db, logger = null }) {
         chapter: toInteger(input.chapter),
         section: input.section ?? null,
         summary: input.summary ?? null,
-        // A new node is never born validated. Somebody signs for it, separately.
         qa_status: { validated: false, validatedBy: null, validatedAt: null },
         ...creationStamps(SCHEMA_VERSION, now),
       };
@@ -143,16 +103,6 @@ export function createAdminResonanceService({ db, logger = null }) {
       return { node: toResonanceNodeResponse(document) };
     },
 
-    /**
-     * Editing a node's type or scores invalidates it: the human sign-off applied to the
-     * previous values, and carrying it forward would let an edit inherit an approval.
-     *
-     * @param {object} admin The acting administrator.
-     * @param {string} id The node identifier.
-     * @param {object} input The validated body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ node: object }>} The updated node.
-     */
     async update(admin, id, input, options = {}) {
       const node = await requireNode(id);
       const now = new Date();
@@ -196,15 +146,6 @@ export function createAdminResonanceService({ db, logger = null }) {
       return { node: toResonanceNodeResponse(updated) };
     },
 
-    /**
-     * `POST /admin/resonance-nodes/:id/validate`. The human act.
-     *
-     * @param {object} admin The acting administrator.
-     * @param {string} id The node identifier.
-     * @param {{ validated: boolean, note?: string }} input The validated body.
-     * @param {{ correlationId?: string|null }} [options] Audit context.
-     * @returns {Promise<{ node: object }>} The updated node.
-     */
     async validate(admin, id, input, options = {}) {
       const node = await requireNode(id);
       const now = new Date();

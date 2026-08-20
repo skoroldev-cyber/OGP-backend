@@ -1,20 +1,7 @@
-/**
- * Append-only audit trail (§9.2.10).
- *
- * Every admin mutation, every payment state change and every canonical-lock rejection
- * lands here. There is no update path and no delete path — the collection is written and
- * read, never edited.
- *
- * Before/after snapshots are redacted on the way in: a password hash, a TOTP secret, a
- * session token hash or a payment token must never be preserved in the audit trail, and
- * the trail must never become a back door around the anti-profiling rules.
- */
-
 import { COLLECTIONS } from '../db/collections.js';
 import { AUDIT_ACTOR_TYPES, PROHIBITED_FIELDS, SCHEMA_VERSION } from '../config/constants.js';
 import { newId } from './ids.js';
 
-/** Keys whose values are always replaced with a marker, at any depth. */
 const SECRET_KEYS = new Set([
   'passwordhash',
   'password',
@@ -33,7 +20,6 @@ const SECRET_KEYS = new Set([
   'cardnumber',
 ]);
 
-/** Keys that may never be persisted at all — dropped rather than masked. */
 const FORBIDDEN_KEYS = new Set(PROHIBITED_FIELDS.map((field) => field.toLowerCase()));
 
 const REDACTED = '[redacted]';
@@ -41,13 +27,6 @@ const MAX_DEPTH = 6;
 const MAX_ARRAY_ITEMS = 50;
 const MAX_STRING_LENGTH = 2000;
 
-/**
- * Deeply copy a value, masking secrets and dropping prohibited keys.
- *
- * @param {unknown} value Any value.
- * @param {number} [depth] Internal recursion depth.
- * @returns {unknown} A safe copy.
- */
 export function redact(value, depth = 0) {
   if (value === null || value === undefined) return value ?? null;
   if (value instanceof Date) return value;
@@ -73,15 +52,6 @@ export function redact(value, depth = 0) {
   return out;
 }
 
-/**
- * Write one audit entry.
- *
- * @param {import('mongodb').Db} db An open database handle.
- * @param {{ actorType: 'admin'|'system'|'webhook', actorId?: string|null, action: string,
- *           targetCollection?: string|null, targetId?: string|null, before?: unknown,
- *           after?: unknown, correlationId?: string|null, at?: Date }} entry The entry.
- * @returns {Promise<string>} The audit entry `_id`.
- */
 export async function writeAudit(db, entry) {
   const {
     actorType,
@@ -124,16 +94,6 @@ export async function writeAudit(db, entry) {
   return document._id;
 }
 
-/**
- * Write an audit entry without letting a failure propagate. For paths where the audit is
- * secondary to the operation (webhook processing, background sweeps) — an admin mutation
- * should use {@link writeAudit} and fail loudly instead.
- *
- * @param {import('mongodb').Db} db An open database handle.
- * @param {object} entry The entry, as for {@link writeAudit}.
- * @param {{ error: Function }} [logger] Logger for the swallowed failure.
- * @returns {Promise<string|null>} The audit entry `_id`, or null when the write failed.
- */
 export async function writeAuditSafe(db, entry, logger) {
   try {
     return await writeAudit(db, entry);
@@ -145,7 +105,6 @@ export async function writeAuditSafe(db, entry, logger) {
   }
 }
 
-/** Canonical action strings, so the same event is never logged under two names. */
 export const AUDIT_ACTIONS = Object.freeze({
   UNIT_SUBMIT_REVIEW: 'unit.submit_review',
   UNIT_APPROVE: 'unit.approve',
